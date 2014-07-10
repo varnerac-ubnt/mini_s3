@@ -524,7 +524,7 @@ get_object(BucketName, Key, Options, Config) ->
      {content_type, proplists:get_value("content-type", Headers)},
      {delete_marker, list_to_existing_atom(proplists:get_value("x-amz-delete-marker", Headers, "false"))},
      {version_id, proplists:get_value("x-amz-version-id", Headers, "null")},
-     {content, list_to_binary(Body)}|
+     {content, Body}|
      extract_metadata(Headers)].
 
 -spec get_object_acl(string(), string()) -> proplists:proplist().
@@ -592,7 +592,7 @@ get_object_torrent(BucketName, Key, Config) ->
     {Headers, Body} = s3_request(Config, get, BucketName, [$/|Key], "torrent", [], <<>>, []),
     [{delete_marker, list_to_existing_atom(proplists:get_value("x-amz-delete-marker", Headers, "false"))},
      {version_id, proplists:get_value("x-amz-delete-marker", Headers, "false")},
-     {torrent, list_to_binary(Body)}].
+     {torrent, Body}].
 
 -spec list_object_versions(string(), proplists:proplist()) -> proplists:proplist().
 
@@ -777,7 +777,7 @@ s3_simple_request(Config, Method, Host, Path, Subresource, Params, POSTData, Hea
                     Subresource, Params, POSTData, Headers) of
         {_Headers, ""} -> ok;
         {_Headers, Body} ->
-            XML = element(1,xmerl_scan:string(Body)),
+            XML = element(1,xmerl_scan:string(binary_to_list(Body))),
             case XML of
                 #xmlElement{name='Error'} ->
                     ErrCode = ms3_xml:get_text("/Error/Code", XML),
@@ -791,7 +791,7 @@ s3_simple_request(Config, Method, Host, Path, Subresource, Params, POSTData, Hea
 s3_xml_request(Config, Method, Host, Path, Subresource, Params, POSTData, Headers) ->
     {_Headers, Body} = s3_request(Config, Method, Host, Path,
                                   Subresource, Params, POSTData, Headers),
-    XML = element(1,xmerl_scan:string(Body)),
+    XML = element(1,xmerl_scan:string(binary_to_list(Body))),
     case XML of
         #xmlElement{name='Error'} ->
             ErrCode = ms3_xml:get_text("/Error/Code", XML),
@@ -884,20 +884,20 @@ s3_request(Config = #config{credentials_store=CredentialsStore,
                                     true -> [$&, ms3_http:make_query_string(Params)]
                                 end]),
     Response = case Method of
-                   get ->
-                       ibrowse:send_req(RequestURI, RequestHeaders1, Method);
-                   delete ->
-                       ibrowse:send_req(RequestURI, RequestHeaders1, Method);
-                   head ->
-                       %% ibrowse is unable to handle HEAD request responses that are sent
-                       %% with chunked transfer-encoding (why servers do this is not
-                       %% clear). While we await a fix in ibrowse, forcing the HEAD request
-                       %% to use HTTP 1.0 works around the problem.
-                       ibrowse:send_req(RequestURI, RequestHeaders1, Method, [],
-                                        [{http_vsn, {1, 0}}]);
-                   _ ->
-                       ibrowse:send_req(RequestURI, RequestHeaders1, Method, Body)
-               end,
+        get ->
+            send_req(RequestURI, RequestHeaders1, Method);
+        delete ->
+           send_req(RequestURI, RequestHeaders1, Method);
+        head ->
+           %% ibrowse is unable to handle HEAD request responses that are sent
+           %% with chunked transfer-encoding (why servers do this is not
+           %% clear). While we await a fix in ibrowse, forcing the HEAD request
+           %% to use HTTP 1.0 works around the problem.
+           Http10Opt = [{http_vsn, {1, 0}}],
+           send_req(RequestURI,RequestHeaders1,Method,<<"">>,Http10Opt);
+        _ ->
+           send_req(RequestURI, RequestHeaders1, Method, Body)
+        end,
     case Response of
         {ok, Status, ResponseHeaders0, ResponseBody} ->
             ResponseHeaders = canonicalize_headers(ResponseHeaders0),
@@ -911,6 +911,18 @@ s3_request(Config = #config{credentials_store=CredentialsStore,
         {error, Error} ->
             erlang:error({aws_error, {socket_error, Error}})
     end.
+
+send_req(Uri, Headers, Method) ->
+    send_req(Uri, Headers, Method, <<"">>, []).
+
+send_req(Uri, Headers, Method, Body) ->
+    send_req(Uri, Headers, Method, Body, []).
+
+send_req(Uri, Headers, Method, Body, Options) ->
+    NewOptions = [{response_format, binary},
+                  {return_raw_request, false},
+                  {give_raw_headers, false}],
+    ibrowse:send_req(Uri, Headers, Method, Body, NewOptions++Options).
 
 make_authorization(AccessKeyId, SecretKey, Method, ContentMD5, ContentType, Date, AmzHeaders,
                    Host, Resource, Subresource) ->
