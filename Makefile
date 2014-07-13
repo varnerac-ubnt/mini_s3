@@ -1,28 +1,57 @@
-# This Makefile written by concrete
-#
-# {concrete_makefile_version, 1}
-#
-# Use this to override concrete's default dialyzer options of
-# -Wunderspecs
-# DIALYZER_OPTS = ...
+ERL = $(shell which erl)
 
-# List dependencies that you do NOT want to be included in the
-# dialyzer PLT for the project here.  Typically, you would list a
-# dependency here if it isn't spec'd well and doesn't play nice with
-# dialyzer or otherwise mucks things up.
-#
-# DIALYZER_SKIP_DEPS = bad_dep_1 \
-#                      bad_dep_2
+ERLFLAGS= -pa $(CURDIR)/.eunit -pa $(CURDIR)/ebin -pa $(CURDIR)/*/ebin
 
-# If you want to add dependencies to the default "all" target provided
-# by concrete, add them here (along with make rules to build them if needed)
-# ALL_HOOK = ...
-
-concrete_rules_file = $(wildcard concrete.mk)
-ifeq ($(concrete_rules_file),concrete.mk)
-    include concrete.mk
-else
-    all:
-	@echo "ERROR: missing concrete.mk"
-	@echo "  run: concrete update"
+REBAR=$(shell which rebar)
+ifeq ($(REBAR),)
+$(error "Rebar not available on this system")
 endif
+
+DEPSOLVER_PLT=$(CURDIR)/.depsolver_plt
+
+DIALYZER_OPTS= -Wunmatched_returns -Werror_handling -Wrace_conditions
+all: build
+
+.PHONY: get-deps build-deps
+
+$(DEPSOLVER_PLT):
+	-dialyzer --output_plt $(DEPSOLVER_PLT) --build_plt \
+		--apps erts kernel stdlib crypto public_key ssh ssl syntax_tools \
+		mnesia xmerl inets asn1 -r deps
+
+get-deps:
+	$(REBAR) g-d
+
+build-deps:
+	$(REBAR) co
+
+build:
+	$(REBAR) co skip_deps=true
+
+eunit: build
+	$(REBAR) eunit skip_deps=true -v
+
+ct:
+	$(REBAR) ct skip_deps=true -v
+
+build_plt: $(DEPSOLVER_PLT) build
+
+dialyzer: $(DEPSOLVER_PLT) build
+	-dialyzer --verbose --plt $(DEPSOLVER_PLT) $(DIALYZER_OPTS) -r ebin
+
+typer: $(DEPSOLVER_PLT)
+	typer --plt $(DEPSOLVER_PLT) -r ./src -I ./include -I ./deps
+
+edoc:
+	$(REBAR) doc skip_deps=true
+
+clean:
+	$(REBAR) clean
+
+distclean: clean
+	rm -f $(DEPSOLVER_PLT)
+	rm -rf $(CURDIR)/deps/
+	rm -rf $(CURDIR)/logs/
+	rm -rf $(CURDIR)/doc/
+
+precommit: distclean get-deps build-deps ct edoc dialyzer

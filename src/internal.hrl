@@ -26,4 +26,7 @@
           bucket_access_type = virtual_hosted :: mini_s3:bucket_access_type()
 }).
 
--define(AMAZON_METADATA_SERVICE_URI, "http://169.254.169.254/latest/meta-data/").
+-define(AMAZON_METADATA_SERVICE,"http://169.254.169.254/latest/meta-data/").
+-define(DEFAULT_HTTP_TIMEOUT, 5000).
+-define(XMLNS_S3, "http://s3.amazonaws.com/doc/2006-03-01/").
+
