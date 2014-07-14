@@ -65,6 +65,7 @@
 
 -ifdef(TEST).
 -compile([export_all]).
+-include_lib("eunit/include/eunit.hrl").
 -endif.
 
 -include("internal.hrl").
@@ -121,10 +122,13 @@
 %% wee bit easier
 -spec manual_start() -> ok.
 manual_start() ->
+    ok = application:start(asn1),
     ok = application:start(crypto),
     ok = application:start(public_key),
     ok = application:start(ssl),
-    ok = application:start(inets).
+    ok = application:start(inets),
+    ok = application:start(lhttpc).
+    
 
 -spec new(credentials()) -> config().
 new({credentials, baked_in, AccessKeyID, SecretAccessKey}) ->
@@ -978,3 +982,34 @@ default_config() ->
         false ->
             throw({error, missing_s3_defaults})
     end.
+
+
+-ifdef(TEST).
+format_s3_uri_test_() ->
+    Config = fun(Url, Type) ->
+                     #config{s3_url = Url, bucket_access_type = Type}
+             end,
+    Tests = [
+             %% hostname
+             {"https://my-aws.me.com", virtual_hosted, "https://bucket.my-aws.me.com:443"},
+             {"https://my-aws.me.com", path, "https://my-aws.me.com:443/bucket"},
+
+             %% ipv4
+             {"https://192.168.12.13", path, "https://192.168.12.13:443/bucket"},
+
+             %% ipv6
+             {"https://[FEDC:BA98:7654:3210:FEDC:BA98:7654:3210]", path,
+              "https://[FEDC:BA98:7654:3210:FEDC:BA98:7654:3210]:443/bucket"},
+
+             %% These tests document current behavior. Using
+             %% virtual_hosted with an IP address does not make sense,
+             %% but leaving as-is for now to avoid adding the
+             %% is_it_an_ip_or_a_name code.
+             {"https://192.168.12.13", virtual_hosted, "https://bucket.192.168.12.13:443"},
+
+             {"https://[FEDC:BA98:7654:3210:FEDC:BA98:7654:3210]", virtual_hosted,
+              "https://bucket.[FEDC:BA98:7654:3210:FEDC:BA98:7654:3210]:443"}
+            ],
+    [ ?_assertEqual(Expect, format_s3_uri(Config(Url, Type), "bucket"))
+      || {Url, Type, Expect} <- Tests ].
+-endif.

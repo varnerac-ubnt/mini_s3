@@ -32,8 +32,8 @@ stop() ->
 %% gen_server callbacks
 %%
 
-init(Cmd) ->
-    Port = start_fakes3(Cmd),
+init(Args) ->
+    Port = start_fakes3(Args),
     {ok, Port}.
 
 handle_call(stop, _From, {port, Port, pid, OSPid}) ->
@@ -57,8 +57,12 @@ code_change(_, State, _) ->
 %%
 
 -spec start_fakes3(Cmd::string()) -> port().
-start_fakes3(Cmd) ->
+start_fakes3({cmd, Cmd}) ->
     Port = open_port({spawn, Cmd}, []),
+    {os_pid, OSPid} = erlang:port_info(Port, os_pid),
+    {port, Port, pid, OSPid};
+start_fakes3({cmd, Cmd, gem_home, GemHome}) ->
+    Port = open_port({spawn, Cmd}, [{env, [{"GEM_HOME", GemHome}]}]),
     {os_pid, OSPid} = erlang:port_info(Port, os_pid),
     {port, Port, pid, OSPid}.
 

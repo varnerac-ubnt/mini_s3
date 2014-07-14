@@ -32,6 +32,7 @@ eunit: build
 	$(REBAR) eunit skip_deps=true -v
 
 ct:
+	cp src/* ebin/
 	$(REBAR) ct skip_deps=true -v
 
 build_plt: $(DEPSOLVER_PLT) build
@@ -53,5 +54,6 @@ distclean: clean
 	rm -rf $(CURDIR)/deps/
 	rm -rf $(CURDIR)/logs/
 	rm -rf $(CURDIR)/doc/
+	rm -rf $(CURDIR)/test/fakes3_SUITE_data/
 
 precommit: distclean get-deps build-deps ct edoc dialyzer
