@@ -65,13 +65,13 @@ t_put_and_delete_object_test(_Config) ->
                                              [],
                                              S3Conf),
     GetResults = mini_s3:get_object(BucketName, Key, [], S3Conf),
-    DelResults = mini_s3:delete_object(BucketName, Key, S3Conf),
+    [_|_] = mini_s3:delete_object(BucketName, Key, S3Conf),
     ok = mini_s3:delete_bucket(BucketName, S3Conf),
     Content = proplists:get_value(content, GetResults),
     Content = iolist_to_binary(Value),
     PutVersion = proplists:get_value(version_id, PutResults),
     GetVersion = proplists:get_value(version_id, GetResults),
-    PutVersion = GetVersion,
+    true = PutVersion =:= GetVersion,
     ContentLength = proplists:get_value(content_length, GetResults),
     true = iolist_size(Value) =:= list_to_integer(ContentLength), 
     ok.
@@ -87,12 +87,6 @@ test_config() ->
 
 fake_credentials() ->
     {credentials, baked_in, "123", "abc"}.
-
-get_test_file_path(Config, Filename) ->
-    Name = filename:join([get_data_dir(Config), "test_files", Filename]),
-    ct:pal(Name),
-    true = filelib:is_file(Name),
-    Name.
 
 %%%------------------------------------------------------------------------
 %%% Private

@@ -1,5 +1,4 @@
 ERL = $(shell which erl)
-
 ERLFLAGS= -pa $(CURDIR)/.eunit -pa $(CURDIR)/ebin -pa $(CURDIR)/*/ebin
 
 REBAR=$(shell which rebar)
@@ -8,8 +7,8 @@ $(error "Rebar not available on this system")
 endif
 
 DEPSOLVER_PLT=$(CURDIR)/.depsolver_plt
-
 DIALYZER_OPTS= -Wunmatched_returns -Werror_handling -Wrace_conditions
+
 all: build
 
 .PHONY: get-deps build-deps
@@ -19,11 +18,41 @@ $(DEPSOLVER_PLT):
 		--apps erts kernel stdlib crypto public_key ssh ssl syntax_tools \
 		mnesia xmerl inets asn1 -r deps
 
+clear-impl-file:
+	@-rm -f dlhttpc
+	@-rm -f lhttpc
+	@-rm -f ibrowse
+
+configure-dlhttpc: clear-impl-file
+	cp -f $(CURDIR)/priv/httpc_impl.hrl.dlhttpc $(CURDIR)/src/httpc_impl.hrl
+	cp -f $(CURDIR)/priv/mini_s3.app.src.dlhttpc $(CURDIR)/src/mini_s3.app.src
+	touch -f dlhttpc
+
+restore: configure-dlhttpc
+
+test-dlhttpc: distclean configure-dlhttpc deps ct 
+
+configure-lhttpc: clear-impl-file
+	cp -f $(CURDIR)/priv/httpc_impl.hrl.lhttpc $(CURDIR)/src/httpc_impl.hrl
+	cp -f $(CURDIR)/priv/mini_s3.app.src.lhttpc $(CURDIR)/src/mini_s3.app.src
+	-touch -f lhttpc
+
+test-lhttpc: distclean configure-lhttpc deps ct
+
+configure-ibrowse: clear-impl-file
+	cp -f $(CURDIR)/priv/httpc_impl.hrl.ibrowse $(CURDIR)/src/httpc_impl.hrl
+	cp -f $(CURDIR)/priv/mini_s3.app.src.ibrowse $(CURDIR)/src/mini_s3.app.src
+	-touch -f ibrowse
+
+test-ibrowse: distclean configure-ibrowse deps ct 
+
 get-deps:
 	$(REBAR) g-d
 
 build-deps:
 	$(REBAR) co
+
+deps: get-deps build-deps
 
 build:
 	$(REBAR) co skip_deps=true
@@ -35,7 +64,7 @@ ct:
 	cp src/* ebin/
 	$(REBAR) ct skip_deps=true -v
 
-build_plt: $(DEPSOLVER_PLT) build
+build-plt: $(DEPSOLVER_PLT) build
 
 dialyzer: $(DEPSOLVER_PLT) build
 	-dialyzer --verbose --plt $(DEPSOLVER_PLT) $(DIALYZER_OPTS) -r ebin
@@ -49,11 +78,11 @@ edoc:
 clean:
 	$(REBAR) clean
 
-distclean: clean
+distclean: clean 
 	rm -f $(DEPSOLVER_PLT)
 	rm -rf $(CURDIR)/deps/
 	rm -rf $(CURDIR)/logs/
 	rm -rf $(CURDIR)/doc/
 	rm -rf $(CURDIR)/test/fakes3_SUITE_data/
 
-precommit: distclean get-deps build-deps ct edoc dialyzer
+precommit: distclean get-deps build-deps ct edoc dialyzer restore

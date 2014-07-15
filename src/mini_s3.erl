@@ -69,6 +69,7 @@
 -endif.
 
 -include("internal.hrl").
+-include("httpc_impl.hrl").
 -include_lib("xmerl/include/xmerl.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
@@ -110,8 +111,8 @@
 
 -type headers() :: [header()].
 
--type response() :: {ok, {{pos_integer(), string()}, headers(), binary()}}
-                  | {error, atom()}.
+-type response() :: {ok, {pos_integer(), headers(), binary()}}
+                  | {error, any()}.
 
 -type post_data() :: {iodata(), string()} | iodata().
 
@@ -127,8 +128,7 @@ manual_start() ->
     ok = application:start(public_key),
     ok = application:start(ssl),
     ok = application:start(inets),
-    ok = application:start(lhttpc).
-    
+    ?START_HTTPC.
 
 -spec new(credentials()) -> config().
 new({credentials, baked_in, AccessKeyID, SecretAccessKey}) ->
@@ -445,8 +445,6 @@ format_s3_uri(#config{s3_url=S3Url, bucket_access_type=BAccessType}, Host) ->
                            if_not_empty(Host, [$/, Host])])
     end.
 
-
-
 %% @doc Generate an S3 URL using Query String Request Authentication
 %% (see
 %% http://docs.amazonwebservices.com/AmazonS3/latest/dev/RESTAuthentication.html#RESTAuthenticationQueryStringAuth
@@ -463,25 +461,22 @@ format_s3_uri(#config{s3_url=S3Url, bucket_access_type=BAccessType}, Host) ->
 %% augment this function's capabilities.
 -spec s3_url(atom(), string(), string(), integer(),
              proplists:proplist(), config()) -> binary().
-s3_url(Method, BucketName, Key, Lifetime, RawHeaders,
-       Config = #config{access_key_id=AccessKey,
-                        secret_access_key=SecretKey})
-  when is_list(BucketName), is_list(Key) ->
-
-    Expires = erlang:integer_to_list(expiration_time(Lifetime)),
-
+s3_url(Method, BucketName, Key, Lifetime, RawHeaders,Config) ->
+    #config{access_key_id=AccessKey,secret_access_key=SecretKey} = Config,
+    Expires = integer_to_list(expiration_time(Lifetime)),
     Path = lists:flatten([$/, BucketName, $/ , Key]),
     CanonicalizedResource = ms3_http:url_encode_loose(Path),
-
-    {_StringToSign, Signature} = make_signed_url_authorization(SecretKey, Method,
-                                                               CanonicalizedResource,
-                                                               Expires, RawHeaders),
-
-    RequestURI = iolist_to_binary([
-                                   format_s3_uri(Config, ""), CanonicalizedResource,
+    {_, Signature} = make_signed_url_authorization(SecretKey,
+                                                   Method,
+                                                   CanonicalizedResource,
+                                                   Expires,
+                                                   RawHeaders),
+    RequestURI = iolist_to_binary([format_s3_uri(Config, ""), 
+                                   CanonicalizedResource,
                                    $?, "AWSAccessKeyId=", AccessKey,
                                    $&, "Expires=", Expires,
-                                   $&, "Signature=", ms3_http:url_encode_loose(Signature)
+                                   $&, "Signature=",
+                                   ms3_http:url_encode_loose(Signature)
                                   ]),
     RequestURI.
 
@@ -814,12 +809,11 @@ s3_xml_request(Config, Method, Host, Path, Subresource, Params, POSTData, Header
 -spec get_credentials_iam_role() -> binary().
 get_credentials_iam_role() ->
     URI = ?AMAZON_METADATA_SERVICE ++ "iam/security-credentials/",
-    Resp = send_req(URI, "GET"),
-    case Resp of
-        {ok, {{200, _}, _Headers, CredentialsIamRole}} ->
+    case send_req(URI, get) of
+        {ok, {200, _Headers, CredentialsIamRole}} ->
             CredentialsIamRole;
-        {ok, {{_, Reason}, _Headers, _Body}} ->
-            erlang:error({iam_error, Reason,
+        {ok, {StatusCode, _Headers, _Body}} ->
+            erlang:error({iam_error, StatusCode,
                           "Failed to retrieve Amazon IAM Role"})
     end.
 
@@ -832,17 +826,16 @@ get_credentials(iam, InitialHeaders, _, _) ->
     URI = ?AMAZON_METADATA_SERVICE ++ "iam/security-credentials/" ++ CredentialsIamRole,
     Resp = send_req(URI, get),
     case Resp of
-        {ok, {{200, _Reason}, _Headers, JSONBody}} ->
+        {ok, {200, _Headers, JSONBody}} ->
             IAMData = jsx:decode(JSONBody),
             AccessKeyBin = proplists:get_value(<<"AccessKeyId">>, IAMData),
             SecretAccessKeyBin = proplists:get_value(<<"SecretAccessKey">>, IAMData),
             SecurityToken = proplists:get_value(<<"Token">>, IAMData),
             Headers = [{"x-amz-security-token", SecurityToken} | InitialHeaders],
             {Headers, AccessKeyBin, SecretAccessKeyBin};
-        {ok, {{StatusCode, Reason}, _Headers, _Body}} ->
-            ErrorMsg = integer_to_list(StatusCode) ++ Reason,
+        {ok, {StatusCode, _Headers, _Body}} ->
             erlang:error({iam_error,
-                          ErrorMsg,
+                          StatusCode,
                           "Failed to retrieve Amazon IAM Credentials"})
     end.
 
@@ -913,17 +906,17 @@ s3_request(Config = #config{credentials_store=CredentialsStore,
 send_s3_request(URI, Method, Headers, Body) ->
     Response = case Method of
         get ->
-            send_req(URI, "GET", Headers);
+            send_req(URI, get, Headers);
         delete ->
-            send_req(URI, "DELETE", Headers);
+            send_req(URI, delete, Headers);
         head ->
             %% ibrowse is unable to handle HEAD request responses that are sent
             %% with chunked transfer-encoding (why servers do this is not
             %% clear). While we await a fix in ibrowse, forcing the HEAD request
             %% to use HTTP 1.0 works around the problem.
             %%
-            %% @TODO: Verify this against live Amazon S3 using lhttpc
-            send_req(URI, "HEAD", Headers);
+            %% @TODO: Verify this against live Amazon S3 using dlhttpc
+            send_req(URI, head, Headers);
         %% @TODO: I think this is 'put' only. Let's make it explicit
         _ ->
             send_req(URI, Method, Headers, Body)
@@ -933,7 +926,7 @@ send_s3_request(URI, Method, Headers, Body) ->
 -spec parse_s3_response(response()) -> {headers(), binary()}.
 parse_s3_response({error, Error}) ->
     erlang:error({aws_error, {socket_error, Error}});
-parse_s3_response({ok, {{StatusCode, _Reason}, Headers, Body}}) ->
+parse_s3_response({ok, {StatusCode, Headers, Body}}) ->
     Headers1 = canonicalize_headers(Headers),
     case StatusCode >= 200 andalso StatusCode =< 299 of
         true ->
@@ -952,8 +945,19 @@ send_req(Uri, Method, Headers) ->
 
 -spec send_req(string(), method()|string(), headers(), iolist()) -> response().
 send_req(Uri, Method, Headers, Body) ->
-    lhttpc:request(Uri, Method, Headers, Body, ?DEFAULT_HTTP_TIMEOUT).
+    ?SEND_REQ.
 
+-spec make_authorization(AccessKeyId::string(),
+                         SecretKey::string(),
+                         Method::atom(),
+                         ContentMD5::string(),
+                         ContentType::string(),
+                         Date::string(),
+                         CanonizedAmzHeaders::string(),
+                         Host::string(),
+                         Resource::string(),
+                         Subresource::string()) ->
+    {StringToSign::string(), Signature::string()}.
 make_authorization(AccessKeyId, SecretKey, Method, ContentMD5, ContentType, Date, AmzHeaders, Host, Resource, Subresource) ->
     CanonizedAmzHeaders =
         [[Name, $:, Value, $\n] || {Name, Value} <- lists:sort(AmzHeaders)],

@@ -1,0 +1,9 @@
+-define(SEND_REQ, ibrowse:send_req(Uri,
+                                   Method,
+                                   Headers,
+                                   Body,
+                                   [{response_format, binary}])
+       ).
+-define(START_HTTPC, {ok, _} = ibrowse:start()).
+
+
