@@ -8,6 +8,7 @@
 %% test callbacks
 -export([t_create_and_delete_bucket_test/1]).
 -export([t_put_and_delete_object_test/1]).
+-export([t_stream_large_file_test/1]).
 -export([t_eunit_test/1]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -21,6 +22,7 @@
 all() ->
     [t_create_and_delete_bucket_test,
      t_put_and_delete_object_test,
+     t_stream_large_file_test,
      t_eunit_test].
 
 init_per_suite(Config) ->
@@ -76,6 +78,23 @@ t_put_and_delete_object_test(_Config) ->
     true = iolist_size(Value) =:= list_to_integer(ContentLength), 
     ok.
 
+t_stream_large_file_test(Config) ->
+    % write a 50Mb file
+    {ok, Filename} = generate_large_file(Config, 1024*1024*50),
+    BucketName = "stream_bucket",
+    Key = "stream_key",
+    S3Conf = test_config(),
+    ok = mini_s3:create_bucket(BucketName, private, none, S3Conf),
+    PutResults = mini_s3:put_object(BucketName,
+                                    Key,
+                                    {stream, Filename, 128*1024},
+                                    [],
+                                    [],
+                                    S3Conf),
+    %GetResults = mini_s3:get_object(BucketName, Key, [], S3Conf),
+    [_|_] = mini_s3:delete_object(BucketName, Key, S3Conf),
+    ok = mini_s3:delete_bucket(BucketName, S3Conf),
+    ok.
 
 %%%------------------------------------------------------------------------
 %%% Private Test Helper Methods
@@ -192,3 +211,24 @@ del_dir_all(Dir) ->
                   Filenames),
     file:del_dir(Dir).
 
+generate_large_file(Config, Size) ->
+    FName = filename:join([get_data_dir(Config), "test_files", "big_file.bin"]),
+    case filelib:is_file(FName) andalso (filelib:file_size(FName) > Size) of
+        true ->
+            {ok, FName};
+        false ->
+            ok = filelib:ensure_dir(FName),
+            file:delete(FName),
+            {ok, File} = file:open(FName, [write, raw, binary]),
+            generate_large_file1(FName, File, Size)
+    end.
+
+generate_large_file1(FName, File, Size) ->
+    Bytes = crypto:rand_bytes(1024 *256),
+    ok = file:write(File, Bytes),
+    case filelib:file_size(FName) > Size of
+        true ->
+            {ok, FName};
+        false ->
+            generate_large_file1(FName, File, Size)
+    end.

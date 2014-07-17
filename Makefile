@@ -24,7 +24,7 @@ clear-impl-file:
 	@-rm -f ibrowse
 
 configure-dlhttpc: clear-impl-file
-	cp -f $(CURDIR)/priv/httpc_impl.hrl.dlhttpc $(CURDIR)/src/httpc_impl.hrl
+	cp -f $(CURDIR)/priv/httpc_impl.erl.dlhttpc $(CURDIR)/src/httpc_impl.erl
 	cp -f $(CURDIR)/priv/mini_s3.app.src.dlhttpc $(CURDIR)/src/mini_s3.app.src
 	touch -f dlhttpc
 
@@ -33,14 +33,14 @@ restore: configure-dlhttpc
 test-dlhttpc: distclean configure-dlhttpc deps ct 
 
 configure-lhttpc: clear-impl-file
-	cp -f $(CURDIR)/priv/httpc_impl.hrl.lhttpc $(CURDIR)/src/httpc_impl.hrl
+	cp -f $(CURDIR)/priv/httpc_impl.erl.lhttpc $(CURDIR)/src/httpc_impl.erl
 	cp -f $(CURDIR)/priv/mini_s3.app.src.lhttpc $(CURDIR)/src/mini_s3.app.src
 	-touch -f lhttpc
 
 test-lhttpc: distclean configure-lhttpc deps ct
 
 configure-ibrowse: clear-impl-file
-	cp -f $(CURDIR)/priv/httpc_impl.hrl.ibrowse $(CURDIR)/src/httpc_impl.hrl
+	cp -f $(CURDIR)/priv/httpc_impl.erl.ibrowse $(CURDIR)/src/httpc_impl.erl
 	cp -f $(CURDIR)/priv/mini_s3.app.src.ibrowse $(CURDIR)/src/mini_s3.app.src
 	-touch -f ibrowse
 

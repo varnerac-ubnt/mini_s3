@@ -1,5 +1,0 @@
-pkg/*
-*.gem
-.bundle
-tmp
-test_root

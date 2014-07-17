@@ -61,7 +61,8 @@
 
 -export([manual_start/0,
          make_authorization/10,
-         make_signed_url_authorization/5]).
+         make_signed_url_authorization/5,
+         service_and_location_to_endpoint/2]).
 
 -ifdef(TEST).
 -compile([export_all]).
@@ -69,14 +70,17 @@
 -endif.
 
 -include("internal.hrl").
--include("httpc_impl.hrl").
 -include_lib("xmerl/include/xmerl.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 -export_type([config/0,
               settable_bucket_attribute_name/0,
               bucket_acl/0,
-              location_constraint/0]).
+              location_constraint/0,
+              service/0,
+              headers/0,
+              method/0,
+              response/0]).
 
 -opaque config() :: record(config).
 
@@ -98,8 +102,13 @@
                        {credentials, iam}.
 
 -type location_constraint() :: none
-                             | us_west_1
-                             | eu.
+                             | 'us-west-1'
+                             | 'us-west-2'
+                             | 'eu-west-1'
+                             | 'ap-southeast-1'
+                             | 'ap-southeast-2'
+                             | 'ap-northeast-1'
+                             | 'sa-east-1'.
 
 -type permission() :: full_control
                     | write
@@ -117,7 +126,21 @@
 -type post_data() :: {iodata(), string()} | iodata().
 
 -type method() :: get | head | post | put | delete | trace | 
-                  options | connect | patch.
+                 options | connect | patch.
+
+-type service() :: iam | s3.
+
+-type chunk_size_bytes() :: pos_integer().
+
+-type put_object() :: iolist() 
+                    | {stream, filename()}
+                    | {stream, filename(), chunk_size_bytes()}.
+
+-type hash() :: string().
+
+-type filename() :: file:filename().
+
+-define(DEFAULT_CHUNK_SIZE, 64*1024). %64k
 
 %% This is a helper function that exists to make development just a
 %% wee bit easier
@@ -128,7 +151,7 @@ manual_start() ->
     ok = application:start(public_key),
     ok = application:start(ssl),
     ok = application:start(inets),
-    ?START_HTTPC.
+    httpc_impl:start().
 
 -spec new(credentials()) -> config().
 new({credentials, baked_in, AccessKeyID, SecretAccessKey}) ->
@@ -219,8 +242,33 @@ location_constraint_to_post_data(LocationConstraint) ->
     xmerl:export_simple([XML], xmerl_xml).
 
 -spec encode_location_constraint(location_constraint()) -> string().
-encode_location_constraint(eu) ->"EU";
-encode_location_constraint(us_west_1) -> "us_west_1".
+encode_location_constraint(Constraint) -> atom_to_list(Constraint).
+location_constraint_to_endpoint('us-east-1') ->
+    "s3.amazonaws.com ";
+location_constraint_to_endpoint(Constraint) ->
+    "s3-" ++ encode_location_constraint(Constraint) ++ ".amazonaws.com".
+
+%% @doc Generates an HTTPS endpoint to an Amazon Web Service from the
+%%      service type (S3, IAM, etc.) and thelocation constraint.
+%%
+%%      e.g. S3 + 'us-west-2' = "https://s3-us-west-2.amazonaws.com"
+-spec service_and_location_to_endpoint(Service  :: service(),
+                                       Location :: location_constraint()) ->
+    string().
+service_and_location_to_endpoint(Service, Location) ->
+    service_and_location_to_endpoint(Service, Location, true).
+
+-spec service_and_location_to_endpoint(Service  :: service(),
+                                       Location :: location_constraint(),
+                                       Secure   :: boolean()) ->
+    string().
+
+service_and_location_to_endpoint(iam, _, true) ->
+    "https://iam.amazonaws.com";
+service_and_location_to_endpoint(s3, Location, true) ->
+    "https://" ++ location_constraint_to_endpoint(Location);
+service_and_location_to_endpoint(s3, Location, false) ->
+    "http://" ++ location_constraint_to_endpoint(Location).
 
 -spec encode_acl(bucket_acl() | undefined) -> string() | undefined.
 encode_acl(undefined)                 -> undefined;
@@ -430,7 +478,7 @@ if_not_empty(_, Value) ->
 
 -spec format_s3_uri(config(), string()) -> string().
 format_s3_uri(#config{s3_url=S3Url, bucket_access_type=BAccessType}, Host) ->
-    {ok,{Protocol,UserInfo,Domain,Port,_Uri,_QueryString}} =
+    {ok,{Protocol,UserInfo,Domain,Port,_URI,_QueryString}} =
         http_uri:parse(S3Url, [{ipv6_host_with_brackets, true}]),
     case BAccessType of
         virtual_hosted ->
@@ -656,7 +704,7 @@ extract_bucket(Node) ->
 
 -spec put_object(string(),
                  string(),
-                 iolist(),
+                 put_object(),
                  proplists:proplist(),
                  [{string(), string()}]) -> [{'version_id', _}, ...].
 put_object(BucketName, Key, Value, Options, HTTPHeaders) ->
@@ -664,13 +712,11 @@ put_object(BucketName, Key, Value, Options, HTTPHeaders) ->
 
 -spec put_object(string(),
                  string(),
-                 iolist(),
+                 put_object(),
                  proplists:proplist(),
                  [{string(), string()}],
                  config()) -> [{'version_id', _}, ...].
-put_object(BucketName, Key, Value, Options, HTTPHeaders, Config)
-  when is_list(BucketName), is_list(Key), is_list(Value) orelse is_binary(Value),
-       is_list(Options) ->
+put_object(BucketName, Key, Value, Options, HTTPHeaders, Config) ->
     RequestHeaders = [{"x-amz-acl", encode_acl(proplists:get_value(acl, Options))}|HTTPHeaders]
         ++ [{["x-amz-meta-"|string:to_lower(MKey)], MValue} ||
                {MKey, MValue} <- proplists:get_value(meta, Options, [])],
@@ -818,7 +864,7 @@ get_credentials_iam_role() ->
     end.
 
 -spec get_credentials(baked_in|iam, headers(), string(), string()) ->
-    {headers(), binary(), binary()}.
+    {headers(), string(), string()}.
 get_credentials(baked_in, Headers, AccessKey, SecretKey) ->
     {Headers, AccessKey, SecretKey};
 get_credentials(iam, InitialHeaders, _, _) ->
@@ -840,13 +886,8 @@ get_credentials(iam, InitialHeaders, _, _) ->
     end.
 
 %% @TODO: Remove this binary() -> iolist() code and use iolist() throughout
+%%        We can easily fix this by remove the functions with guard clauses
 -spec s3_request(config(), method(), string(), string(), string(), list(), post_data(), headers()) -> {headers(), binary()}.
-s3_request(Config,Method,Host,Path,Sub,Params,POSTData,InitialHeaders)
-    when is_binary(POSTData) ->
-    s3_request(Config,Method,Host,Path,Sub,Params,[POSTData],InitialHeaders);
-s3_request(Config, Method, Host, Path, Sub, Params, {D, C}, InitialHeaders)
-    when is_binary(D) ->
-    s3_request(Config,Method,Host,Path,Sub,Params,{[D], C},InitialHeaders);
 s3_request(Config = #config{credentials_store=CredentialsStore,
                             access_key_id=MaybeAccessKey,
                             secret_access_key=MaybeSecretKey},
@@ -854,20 +895,7 @@ s3_request(Config = #config{credentials_store=CredentialsStore,
     {Headers, AccessKey, SecretKey} =
         get_credentials(CredentialsStore, InitialHeaders,
                         MaybeAccessKey, MaybeSecretKey),
-    {ContentMD5, ContentType, Body} =
-        case POSTData of
-            {PD, CT} ->
-                {base64:encode(crypto:hash(md5, PD)), CT, PD};
-            PD ->
-                %% On a put/post even with an empty body we need to
-                %% default to some content-type
-                case Method of
-                    _ when put == Method; post == Method ->
-                        {"", "text/xml", PD};
-                    _ ->
-                        {"", "", PD}
-                end
-        end,
+    {ContentMD5, ContentType, Body} = hash_post_data(POSTData),
     AmzHeaders = lists:filter(fun ({"x-amz-" ++ _, V}) when
                                         V =/= undefined -> true;
                                   (_) -> false
@@ -882,8 +910,8 @@ s3_request(Config = #config{credentials_store=CredentialsStore,
     FHeaders = [Header || {_, Value} = Header <- Headers, Value =/= undefined],
     RequestHeaders0 = [{"date", Date}, {"authorization", Authorization}|FHeaders] ++
         case ContentMD5 of
-            "" -> [];
-            _  -> [{"content-md5", binary_to_list(ContentMD5)}]
+            <<>> -> [];
+            _    -> [{"content-md5", ContentMD5}]
         end,
     RequestHeaders1 = case proplists:is_defined("content-type", RequestHeaders0) of
                           true ->
@@ -917,12 +945,81 @@ send_s3_request(URI, Method, Headers, Body) ->
             %%
             %% @TODO: Verify this against live Amazon S3 using dlhttpc
             send_req(URI, head, Headers);
-        %% @TODO: I think this is 'put' only. Let's make it explicit
         _ ->
+            %% @TODO: I think this is 'put' only. Let's make it explicit
             send_req(URI, Method, Headers, Body)
     end,
     parse_s3_response(Response).
+
+% @TODO Clean up this ugly method signature.:
+-spec hash_post_data({PostData    :: iolist()
+                                   | {stream, filename()}
+                                   | {stream, filename(), chunk_size_bytes()},
+                      ContentType :: string()
+                     }) ->
+    {Hash        :: string(), 
+     ContentType :: string(),
+     Body        :: iolist()
+                  | {stream, filename(), chunk_size_bytes()}
+    }.
+hash_post_data({{stream, Filename}, ContentType}) ->
+    hash_post_data({{stream, Filename, ?DEFAULT_CHUNK_SIZE}, ContentType});    
+hash_post_data({{stream, Filename, ChunkSize} = PostData, ContentType}) ->
+    {base64_hash_file(Filename, ChunkSize), ContentType, PostData};
+hash_post_data({PostData, ContentType}) ->
+    {base64:encode_to_string(crypto:hash(md5,PostData)), ContentType, PostData};
+hash_post_data(PostData) ->
+    %% On a put/post even with an empty body we need some content-type
+    {"", "text/xml", PostData}.
+-spec base64_hash_file(Filename  :: filename(),
+                       ChunkSize :: chunk_size_bytes())->
+    {ok, string()} | {error, Reason::any()}.
+base64_hash_file(Filename, ChunkSize) ->
+    base64_hash_file(Filename, ChunkSize, md5).
+
+-spec base64_hash_file(Filename  :: filename(),
+                       ChunkSize :: chunk_size_bytes(),
+                       Algorithm :: crypto:hash_algorithms()) ->
+    base64:ascii_binary() | {error, Reason::any()}.
+base64_hash_file(Filename, ChunkSize, Algorithm) ->
+    case hash_file(Filename, ChunkSize, Algorithm) of
+        {ok, Hash}      -> base64:encode_to_string(Hash);
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec hash_file(Filename  :: filename(),
+                ChunkSize :: chunk_size_bytes(),
+                Algorithm :: crypto:hash_algorithms()) ->
+    {ok, hash()} | {error, Reason::any()}.
+hash_file(Filename, ChunkSize, Algorithm) ->
+    HashContext = crypto:hash_init(Algorithm),
+    case file:open(Filename, [read, raw, binary]) of 
+        {ok, File} ->
+            Data = file:read(File, ChunkSize),
+            hash_file(File, ChunkSize, HashContext, Data);
+        {error, Reason} ->
+            {error, Reason}
+    end.
     
+-spec hash_file(File        :: file:file(),
+                ChunkSize   :: chunk_size_bytes(),
+                HashContext :: any(),
+                ReadResult  :: {ok, Data::binary()} | eof | {error, any()}) ->
+    {ok, hash()} | {error, Reason::any()}.
+hash_file(File, _ChunkSize, HashContext, eof) ->
+    case file:close(File) of
+        ok ->
+            {ok, crypto:hash_final(HashContext)};
+        {error, Reason} ->
+            {error, Reason}
+    end;
+hash_file(File, ChunkSize, HashContext, {ok, Data}) ->
+    NewContext = crypto:hash_update(HashContext, Data),
+    NewData = file:read(File, ChunkSize),
+    hash_file(File, ChunkSize, NewContext, NewData);
+hash_file(_File, _ChunkSize, _HashContext, {error, Reason}) ->
+    {error, Reason}.
+
 -spec parse_s3_response(response()) -> {headers(), binary()}.
 parse_s3_response({error, Error}) ->
     erlang:error({aws_error, {socket_error, Error}});
@@ -936,24 +1033,42 @@ parse_s3_response({ok, {StatusCode, Headers, Body}}) ->
     end.
 
 -spec send_req(string(), method() | string()) -> response().
-send_req(Uri, Method) ->
-    send_req(Uri, Method, [], []).
+send_req(URI, Method) ->
+    send_req(URI, Method, [], []).
 
 -spec send_req(string(), method() | string(), headers()) -> response().
-send_req(Uri, Method, Headers) ->
-    send_req(Uri, Method, Headers, []).
+send_req(URI, Method, Headers) ->
+    send_req(URI, Method, Headers, []).
 
--spec send_req(string(), method()|string(), headers(), iolist()) -> response().
-send_req(Uri, Method, Headers, Body) ->
-    ?SEND_REQ.
+%% @doc send_req passes the request to the underlying HTTP Client
+%%      implementation 
+%%
+-spec send_req(URI      :: string(),
+               Method   :: method(),
+               Headers  :: headers(),
+               Body     :: iolist()
+                         | {stream, filename(), chunk_size_bytes()}) ->
+    response().
+send_req(URI, Method, Headers, {{stream, Filename, _}, _CT} = Body) ->
+    CL = "content-length",
+    NewHeaders = case lists:keyfind(CL, 1, Headers) of
+        false ->
+            CLHeader = {CL, integer_to_list(filelib:file_size(Filename))},
+            lists:keystore(CL, 1, Headers, CLHeader);
+        _ ->
+            Headers
+    end,
+    send_req(URI, Method, NewHeaders, Body);
+send_req(URI, Method, Headers, Body) ->
+    httpc_impl:send_req(URI, Method, Headers, Body, ?HTTP_TIMEOUT).
 
--spec make_authorization(AccessKeyId::string(),
-                         SecretKey::string(),
+-spec make_authorization(AccessKeyId::binary(),
+                         SecretKey::binary(),
                          Method::atom(),
-                         ContentMD5::string(),
+                         ContentMD5::binary(),
                          ContentType::string(),
                          Date::string(),
-                         CanonizedAmzHeaders::string(),
+                         AmzHeaders::headers(),
                          Host::string(),
                          Resource::string(),
                          Subresource::string()) ->
@@ -961,6 +1076,8 @@ send_req(Uri, Method, Headers, Body) ->
 make_authorization(AccessKeyId, SecretKey, Method, ContentMD5, ContentType, Date, AmzHeaders, Host, Resource, Subresource) ->
     CanonizedAmzHeaders =
         [[Name, $:, Value, $\n] || {Name, Value} <- lists:sort(AmzHeaders)],
+    %% It's called String to sign in Amazon documentation, however in
+    %% our implementation, it is an iolist()
     StringToSign = [string:to_upper(atom_to_list(Method)), $\n,
                     ContentMD5, $\n,
                     ContentType, $\n,
@@ -969,7 +1086,7 @@ make_authorization(AccessKeyId, SecretKey, Method, ContentMD5, ContentType, Date
                     if_not_empty(Host, [$/, Host]),
                     Resource,
                     if_not_empty(Subresource, [$?, Subresource])],
-    ShaHmac = crypto:hmac(sha, SecretKey, StringToSign),
+    ShaHmac = crypto:hmac(slha, SecretKey, StringToSign),
     Signature = base64:encode_to_string(ShaHmac),
     {StringToSign, lists:flatten(["AWS ", AccessKeyId, $:, Signature])}.
 
@@ -986,7 +1103,6 @@ default_config() ->
         false ->
             throw({error, missing_s3_defaults})
     end.
-
 
 -ifdef(TEST).
 format_s3_uri_test_() ->
