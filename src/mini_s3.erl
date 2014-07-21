@@ -79,10 +79,14 @@
               location_constraint/0,
               service/0,
               headers/0,
+              canonical_headers/0,
               method/0,
-              response/0]).
+              http_response/0,
+              httpc_opts/0]).
 
 -opaque config() :: record(config).
+
+-type datetime() :: calendar:date() | calendar:datetime().
 
 -type bucket_access_type() :: virtual_hosted | path.
 
@@ -116,12 +120,14 @@
                     | read
                     | read_acp.
 
--type header()  :: {string(), string() | undefined}.
+-type header()  :: {string(), any() | undefined}.
 
 -type headers() :: [header()].
 
--type response() :: {ok, {pos_integer(), headers(), binary()}}
-                  | {error, any()}.
+-type canonical_headers() :: [{string(), string()}].
+
+-type http_response() :: {ok, {pos_integer(), headers(), binary()}}
+                       | {error, any()}.
 
 -type post_data() :: {iodata(), string()} | iodata().
 
@@ -133,14 +139,92 @@
 -type chunk_size_bytes() :: pos_integer().
 
 -type put_object() :: iolist() 
-                    | {stream, filename()}
-                    | {stream, filename(), chunk_size_bytes()}.
+                    | {stream_from, filename()}
+                    | {stream_from, filename(), chunk_size_bytes()}.
 
 -type hash() :: string().
 
 -type filename() :: file:filename().
 
--define(DEFAULT_CHUNK_SIZE, 64*1024). %64k
+-type etag() :: string().
+
+-type range() :: {range, Start::integer(), End::integer()}.
+
+-type partial_download_opt() :: {partial_download,
+                                 [{window_size, infinity | pos_integer()}
+                                | {part_size, pos_integer()}
+                                 ]
+                                }.
+-type stream_to_file_opt() :: {stream_to_file, file:filename()}.
+
+-type get_object_option() :: {range, range() | string()}
+                           | {if_modified_since, datetime()}
+                           | {if_unmodified_since, datetime()}
+                           | {if_match, etag()}
+                           | {if_none_match, etag()}
+                           | {version_id, string()}
+                           | stream_to_file_opt()
+                           | partial_download_opt()
+                           | {window_size, infinity | pos_integer()}
+                           | {part_size, pos_integer()}
+                           | lhttpc_opt().
+
+-type get_object_options() :: [get_object_option()].
+
+-type copy_object_option()  :: {version_id, string()}
+                             | {metadata_directive, string()}
+                             | {if_match, etag()}
+                             | {if_none_match, etag()}
+                             | {if_unmodified_since, string()}
+                             | {if_modified_since, string()}
+                             | {acl, string()}
+                             | lhttpc_opt().
+
+-type copy_object_options() :: [copy_object_option()].
+
+-type list_objects_option() :: {delimiter, string()}
+                             | {marker, string()}
+                             | {max_keys, string()}
+                             | {prefix, string()}
+                             | lhttpc_opt().
+
+-type list_objects_options() :: [list_objects_option()].
+
+-type put_object_option() :: {meta, [{Key::string(), Value::string()}]}
+                           | {acl, string()}
+                           | {send_retry, pos_integer()}
+                           | lhttpc_opt().
+
+-type put_object_options() :: [put_object_option()].
+
+-type list_object_versions_option() :: {delimiter, string()}
+                                     | {key_marker, string()}
+                                     | {max_keys, string()}
+                                     | {prefix, string()}
+                                     | {version_id_marker, string()}
+                                     | lhttpc_opt().
+
+-type list_object_versions_options() :: [list_object_versions_option()].
+
+-type get_object_metadata_option() :: {if_modified_since, datetime()}
+                                    | {if_unmodified_since, datetime()}
+                                    | {if_match, etag()}
+                                    | {if_none_match, etag()}
+                                    | {version_id, string()}
+                                    | lhttpc_opt().
+
+-type get_object_metadata_options() :: [get_object_metadata_option()].
+
+-type get_object_acl_options() :: [{version_id, string()}].
+
+-type httpc_opt() :: {timeout, pos_integer()}.
+
+-type httpc_opts() :: [httpc_opt()].
+
+-type lhttpc_opt() :: {connect_timeout, pos_integer() | infinity}
+                    | {connect_options, [ssl:ssloption() | gen_tcp:option()]}
+                    | {proxy, httpc:url()}
+                    | {proxy_ssl_options, [ssl:ssloption()]}.
 
 %% This is a helper function that exists to make development just a
 %% wee bit easier
@@ -173,42 +257,34 @@ new(Credentials, Host, BucketAccessType) ->
     Config#config{s3_url=Host,
                   bucket_access_type=BucketAccessType}.
 
--spec copy_object(string(), string(), string(),
-                  string(), proplists:proplist()) -> proplists:proplist().
+-spec copy_object(string(),
+                  string(),
+                  string(),
+                  string(),
+                  copy_object_options()) -> proplists:proplist().
 copy_object(DestBucketName, DestKeyName, SrcBucketName, SrcKeyName, Options) ->
     copy_object(DestBucketName, DestKeyName, SrcBucketName,
                 SrcKeyName, Options, default_config()).
 
--spec copy_object(string(), string(), string(), string(),
-                  proplists:proplist(), config()) -> proplists:proplist().
-copy_object(DestBucketName, DestKeyName, SrcBucketName, SrcKeyName, Options, Config) ->
-    SrcVersion = case proplists:get_value(version_id, Options) of
+-spec copy_object(string(),
+                  string(),
+                  string(),
+                  string(),
+                  copy_object_options(),
+                  config()) -> proplists:proplist().
+copy_object(DestBucketName,DestKeyName,SrcBucketName,SrcKeyName,Opts,Config) ->
+    SrcVersion = case get_value(version_id, Opts) of
                      undefined -> "";
                      VersionID -> ["?versionId=", VersionID]
                  end,
-    RequestHeaders =
-        [{"x-amz-copy-source", lists:flatten([SrcBucketName, $/, SrcKeyName, SrcVersion])},
-         {"x-amz-metadata-directive",
-          proplists:get_value(metadata_directive, Options)},
-         {"x-amz-copy-source-if-match", proplists:get_value(if_match, Options)},
-         {"x-amz-copy-source-if-none-match",
-          proplists:get_value(if_none_match, Options)},
-         {"x-amz-copy-source-if-unmodified-since",
-          proplists:get_value(if_unmodified_since, Options)},
-         {"x-amz-copy-source-if-modified-since",
-          proplists:get_value(if_modified_since, Options)},
-         {"x-amz-acl", encode_acl(proplists:get_value(acl, Options))}],
-    {Headers, _Body} = s3_request(Config,
-                                  put,
-                                  DestBucketName,
-                                  [$/|DestKeyName],
-                                  "",
-                                  [],
-                                  [],
-                                  RequestHeaders),
-    [{copy_source_version_id,
-      proplists:get_value("x-amz-copy-source-version-id", Headers, "false")},
-     {version_id, proplists:get_value("x-amz-version-id", Headers, "null")}].
+    ReqHdrs = make_copy_headers(SrcBucketName, SrcKeyName, SrcVersion, Opts),
+    R = s3_request(Config,put,DestBucketName,[$/|DestKeyName],"",[],[],ReqHdrs),
+    {RespHdrs, _Body} = R,
+    [
+     {copy_source_version_id,
+      get_value("x-amz-copy-source-version-id", RespHdrs, "false")},
+     {version_id, get_value("x-amz-version-id", RespHdrs, "null")}
+    ].
 
 -spec create_bucket(string(), bucket_acl()|undefined, location_constraint()) ->
     ok.
@@ -220,16 +296,17 @@ create_bucket(BucketName, ACL, LocationConstraint) ->
                     location_constraint(),
                     config()) -> ok.
 create_bucket(BucketName, ACL, LocationConstraint, Config) ->
-    Headers = acl_to_headers(ACL),
-    POSTData = location_constraint_to_post_data(LocationConstraint),
-    s3_simple_request(Config, put, BucketName, "/", "", [], POSTData, Headers).
+    Hdrs = case ACL of
+        private -> [];
+        _       -> [acl_header(ACL)]
+    end,
+    Data = location_constraint_to_post_data(LocationConstraint),
+    s3_simple_request(Config, put, BucketName, "/", "", [], Data, Hdrs).
 
--spec acl_to_headers(bucket_acl() | undefined) ->
-    [{string(), string() | undefined}].
-acl_to_headers(private) ->
-    [];
-acl_to_headers(ACL) ->
-    [{"x-amz-acl", encode_acl(ACL)}].
+-spec acl_header(bucket_acl() | undefined) ->
+    {string(), string() | undefined}.
+acl_header(ACL) ->
+    {"x-amz-acl", encode_acl(ACL)}.
 
 -spec location_constraint_to_post_data(location_constraint()) -> iolist().
 location_constraint_to_post_data(none) ->
@@ -249,20 +326,18 @@ location_constraint_to_endpoint(Constraint) ->
     "s3-" ++ encode_location_constraint(Constraint) ++ ".amazonaws.com".
 
 %% @doc Generates an HTTPS endpoint to an Amazon Web Service from the
-%%      service type (S3, IAM, etc.) and thelocation constraint.
+%%      service type (S3, IAM, etc.) and the location constraint.
 %%
 %%      e.g. S3 + 'us-west-2' = "https://s3-us-west-2.amazonaws.com"
--spec service_and_location_to_endpoint(Service  :: service(),
-                                       Location :: location_constraint()) ->
+-spec service_and_location_to_endpoint(service(), location_constraint()) ->
     string().
 service_and_location_to_endpoint(Service, Location) ->
     service_and_location_to_endpoint(Service, Location, true).
 
--spec service_and_location_to_endpoint(Service  :: service(),
-                                       Location :: location_constraint(),
-                                       Secure   :: boolean()) ->
+-spec service_and_location_to_endpoint(service(),
+                                       location_constraint(),
+                                       Secure::boolean()) ->
     string().
-
 service_and_location_to_endpoint(iam, _, true) ->
     "https://iam.amazonaws.com";
 service_and_location_to_endpoint(s3, Location, true) ->
@@ -295,8 +370,8 @@ delete_object(BucketName, Key) ->
 delete_object(BucketName, Key, Config) ->
     {Headers, _Body} = s3_request(Config, delete,
                                   BucketName, [$/|Key], "", [], [], []),
-    Marker = proplists:get_value("x-amz-delete-marker", Headers, "false"),
-    Id = proplists:get_value("x-amz-version-id", Headers, "null"),
+    Marker = get_value("x-amz-delete-marker", Headers, "false"),
+    Id = get_value("x-amz-version-id", Headers, "null"),
     [{delete_marker, list_to_existing_atom(Marker)},
      {version_id, Id}].
 
@@ -310,8 +385,8 @@ delete_object_version(BucketName, Key, Version) ->
 delete_object_version(BucketName, Key, Version, Config) ->
     {Headers, _Body} = s3_request(Config, delete, BucketName, [$/|Key],
                                   "versionId=" ++ Version, [], [], []),
-    Marker = proplists:get_value("x-amz-delete-marker", Headers, "false"),
-    Id = proplists:get_value("x-amz-version-id", Headers, "null"),
+    Marker = get_value("x-amz-delete-marker", Headers, "false"),
+    Id = get_value("x-amz-version-id", Headers, "null"),
     [{delete_marker, list_to_existing_atom(Marker)},
      {version_id, Id}].
 
@@ -330,13 +405,13 @@ list_buckets(Config) ->
 list_objects(BucketName, Options) ->
     list_objects(BucketName, Options, default_config()).
 
--spec list_objects(string(), proplists:proplist(), config()) ->
+-spec list_objects(string(), list_objects_options(), config()) ->
     proplists:proplist().
 list_objects(BucketName, Options, Config) ->
-    Params = [{"delimiter", proplists:get_value(delimiter, Options)},
-              {"marker", proplists:get_value(marker, Options)},
-              {"max-keys", proplists:get_value(max_keys, Options)},
-              {"prefix", proplists:get_value(prefix, Options)}],
+    Params = [{"delimiter", get_value(delimiter, Options)},
+              {"marker", get_value(marker, Options)},
+              {"max-keys", get_value(max_keys, Options)},
+              {"prefix", get_value(prefix, Options)}],
     Doc = s3_xml_request(Config, get, BucketName, "/", "", Params, [], []),
     Attributes = [{name, "Name", text},
                   {prefix, "Prefix", text},
@@ -346,6 +421,16 @@ list_objects(BucketName, Options, Config) ->
                   {is_truncated, "IsTruncated", boolean},
                   {contents, "Contents", fun extract_contents/1}],
     ms3_xml:decode(Attributes, Doc).
+
+make_copy_headers(BucketName, KeyName, Version, Opts)->
+    [{"x-amz-copy-source", lists:flatten([BucketName, $/, KeyName, Version])},
+     {"x-amz-metadata-directive", get_value(metadata_directive, Opts)},
+     {"x-amz-copy-source-if-match", get_value(if_match, Opts)},
+     {"x-amz-copy-source-if-none-match",get_value(if_none_match, Opts)},
+     {"x-amz-copy-source-if-unmodified-since",
+      get_value(if_unmodified_since, Opts)},
+     {"x-amz-copy-source-if-modified-since",get_value(if_modified_since, Opts)},
+     {"x-amz-acl", encode_acl(get_value(acl, Opts))}].
 
 extract_contents(Nodes) ->
     Attributes = [{key, "Key", text},
@@ -361,11 +446,12 @@ extract_user([Node]) ->
                   {display_name, "DisplayName", optional_text}],
     ms3_xml:decode(Attributes, Node).
 
--spec get_bucket_attribute(string(), settable_bucket_attribute_name()) -> term().
+-spec get_bucket_attribute(string(), settable_bucket_attribute_name()) -> 
+    term().
 get_bucket_attribute(BucketName, AttributeName) ->
     get_bucket_attribute(BucketName, AttributeName, default_config()).
 
--spec get_bucket_attribute(string(), settable_bucket_attribute_name(), config()) ->
+-spec get_bucket_attribute(string(),settable_bucket_attribute_name(),config())->
     term().
 get_bucket_attribute(BucketName, AttributeName, Config) ->
     Attr = encode_attribute_name(AttributeName),
@@ -439,25 +525,38 @@ decode_permission("READ_ACP")     -> read_acp.
 
 %% @doc Canonicalizes a proplist of {"Header", "Value"} pairs by
 %% lower-casing all the Headers.
--spec canonicalize_headers(headers()) -> 
-    [{LowerCaseHeader::string(), Value::string()}].
+-spec canonicalize_headers(headers()) -> canonical_headers().
 canonicalize_headers(Headers) ->
     [{string:to_lower(to_string(H)), V} || {H, V} <- Headers ].
 
--spec to_string(atom() | string()) -> string().
+-spec to_string(atom() | string() | binary() | range()) -> string().
 to_string(A) when is_atom(A) ->
     erlang:atom_to_list(A);
+to_string(B) when is_binary(B) ->
+    erlang:binary_to_list(B);
 to_string(S) when is_list(S) ->
-    S.
+    S;
+to_string({range, Start, End}) when is_integer(Start), is_integer(End) ->
+    "bytes="++integer_to_list(Start)++"-"++integer_to_list(End);
+to_string({range, Start, End})  when is_list(Start), is_list(End) ->
+    "bytes="++Start++"-"++End;
+to_string({Y, M, D})  when is_integer(Y), is_integer(M), is_integer(D) ->
+    httpd_util:rfc1123_date({{Y, M, D},{0, 0, 0}});
+to_string({{Y, M, D}, {H, Min, S}})  when is_integer(Y),
+                                          is_integer(M),
+                                          is_integer(D),
+                                          is_integer(H),
+                                          is_integer(Min),
+                                          is_integer(S) ->
+    httpd_util:rfc1123_date({{Y, M, D}, {H, Min, S}}).
 
 %% @doc Retrieves a value from a set of canonicalized headers.  The
 %% given header should already be canonicalized (i.e., lower-cased).
 %% Returns the value or the empty string if no such value was found.
--spec retrieve_header_value(Header::string(),
-                            AllHeaders::[{Header::string(), Value::string()}]) ->
+-spec retrieve_header_value(string(), canonical_headers()) ->
                                    string().
 retrieve_header_value(Header, AllHeaders) ->
-    proplists:get_value(Header, AllHeaders, "").
+    get_value(Header, AllHeaders, "").
 
 %% @doc Number of seconds since the Epoch that a request can be valid
 %% for, specified by TimeToLive, which is the number of seconds from
@@ -531,16 +630,13 @@ s3_url(Method, BucketName, Key, Lifetime, RawHeaders,Config) ->
 make_signed_url_authorization(SecretKey, Method, CanonicalizedResource,
                               Expires, RawHeaders) ->
     Headers = canonicalize_headers(RawHeaders),
-
     HttpMethod = string:to_upper(atom_to_list(Method)),
-
     ContentType = retrieve_header_value("content-type", Headers),
     ContentMD5 = retrieve_header_value("content-md5", Headers),
 
     %% We don't currently use this, but I'm adding a placeholder for future enhancements See
     %% the URL in the docstring for details
     CanonicalizedAMZHeaders = "",
-
 
     StringToSign = lists:flatten([HttpMethod, $\n,
                                   ContentMD5, $\n,
@@ -554,40 +650,49 @@ make_signed_url_authorization(SecretKey, Method, CanonicalizedResource,
     {StringToSign, Signature}.
 
 
--spec get_object(string(), string(), proplists:proplist()) ->
+-spec get_object(string(), string(), get_object_options()) ->
                         proplists:proplist().
-
 get_object(BucketName, Key, Options) ->
     get_object(BucketName, Key, Options, default_config()).
 
--spec get_object(string(), string(), proplists:proplist(), config()) ->
+-spec get_object(string(), string(), get_object_options(), config()) ->
                         proplists:proplist().
+get_object(BucketName, Key, Opts, Config) ->
+    Hdrs = [{"Range", get_value(range, Opts)},
+            {"If-Modified-Since", get_value(if_modified_since, Opts)},
+            {"If-Unmodified-Since", get_value(if_unmodified_since, Opts)},
+            {"If-Match", get_value(if_match, Opts)},
+            {"If-None-Match", get_value(if_none_match, Opts)}],
+    Sub = case get_value(version_id, Opts) of
+              undefined -> "";
+              Version   -> ["versionId=", Version]
+    end,
+    Resp = s3_request(Config,get,BucketName,[$/|Key],Sub,[],[],Hdrs,Opts),
+    {RespHdrs, Content} = Resp,
+    ResponseTuple = case get_value(filename, Opts) of
+              undefined -> {content, Content};
+              Filename   -> {filename, Filename}
+    end,
+    extract_metadata(RespHdrs) ++
+    [ResponseTuple,
+     {etag, get_value("etag", RespHdrs)},
+     {content_length, get_value("content-length", RespHdrs)},
+     {content_type, get_value("content-type", RespHdrs)},
+     {delete_marker, is_delete_marker(RespHdrs)},
+     {version_id, get_value("x-amz-version-id", RespHdrs, "null")}
+    ].
 
-get_object(BucketName, Key, Options, Config) ->
-    RequestHeaders = [{"Range", proplists:get_value(range, Options)},
-                      {"If-Modified-Since", proplists:get_value(if_modified_since, Options)},
-                      {"If-Unmodified-Since", proplists:get_value(if_unmodified_since, Options)},
-                      {"If-Match", proplists:get_value(if_match, Options)},
-                      {"If-None-Match", proplists:get_value(if_none_match, Options)}],
-    Subresource = case proplists:get_value(version_id, Options) of
-                      undefined -> "";
-                      Version   -> ["versionId=", Version]
-                  end,
-    {Headers, Body} = s3_request(Config, get, BucketName, [$/|Key], Subresource, [], [], RequestHeaders),
-    [{etag, proplists:get_value("etag", Headers)},
-     {content_length, proplists:get_value("content-length", Headers)},
-     {content_type, proplists:get_value("content-type", Headers)},
-     {delete_marker, list_to_existing_atom(proplists:get_value("x-amz-delete-marker", Headers, "false"))},
-     {version_id, proplists:get_value("x-amz-version-id", Headers, "null")},
-     {content, Body}|
-     extract_metadata(Headers)].
+is_delete_marker(Hdrs) ->
+    case get_value("x-amz-delete-marker", Hdrs) of
+        "true"  -> true;
+        _       -> false
+    end. 
 
 -spec get_object_acl(string(), string()) -> proplists:proplist().
-
 get_object_acl(BucketName, Key) ->
     get_object_acl(BucketName, Key, default_config()).
 
--spec get_object_acl(string(), string(), proplists:proplist() | config()) -> proplists:proplist().
+-spec get_object_acl(string(), string(), get_object_acl_options() | config()) -> proplists:proplist().
 
 get_object_acl(BucketName, Key, Config)
   when is_record(Config, config) ->
@@ -596,9 +701,9 @@ get_object_acl(BucketName, Key, Config)
 get_object_acl(BucketName, Key, Options) ->
     get_object_acl(BucketName, Key, Options, default_config()).
 
--spec get_object_acl(string(), string(), proplists:proplist(), config()) -> proplists:proplist().
+-spec get_object_acl(string(), string(), get_object_acl_options(), config()) -> proplists:proplist().
 get_object_acl(BucketName, Key, Options, Config) ->
-    Subresource = case proplists:get_value(version_id, Options) of
+    Subresource = case get_value(version_id, Options) of
                       undefined -> "";
                       Version   -> ["&versionId=", Version]
                   end,
@@ -607,72 +712,76 @@ get_object_acl(BucketName, Key, Options, Config) ->
                   {access_control_list, "AccessControlList/Grant", fun extract_acl/1}],
     ms3_xml:decode(Attributes, Doc).
 
--spec get_object_metadata(string(), string(), proplists:proplist()) -> proplists:proplist().
-
+-spec get_object_metadata(string(), string(), get_object_metadata_options()) ->
+    proplists:proplist().
 get_object_metadata(BucketName, Key, Options) ->
     get_object_metadata(BucketName, Key, Options, default_config()).
 
--spec get_object_metadata(string(), string(), proplists:proplist(), config()) -> proplists:proplist().
-
+-spec get_object_metadata(string(),
+                          string(),
+                          get_object_metadata_options(),
+                          config()) -> proplists:proplist().
 get_object_metadata(BucketName, Key, Options, Config) ->
-    RequestHeaders = [{"If-Modified-Since", proplists:get_value(if_modified_since, Options)},
-                      {"If-Unmodified-Since", proplists:get_value(if_unmodified_since, Options)},
-                      {"If-Match", proplists:get_value(if_match, Options)},
-                      {"If-None-Match", proplists:get_value(if_none_match, Options)}],
-    Subresource = case proplists:get_value(version_id, Options) of
+    RequestHeaders = [{"If-Modified-Since", get_value(if_modified_since, Options)},
+                      {"If-Unmodified-Since", get_value(if_unmodified_since, Options)},
+                      {"If-Match", get_value(if_match, Options)},
+                      {"If-None-Match", get_value(if_none_match, Options)}],
+    Subresource = case get_value(version_id, Options) of
                       undefined -> "";
                       Version   -> ["versionId=", Version]
                   end,
     {Headers, _Body} = s3_request(Config, head, BucketName, [$/|Key], Subresource, [], [], RequestHeaders),
-    [{last_modified, proplists:get_value("last-modified", Headers)},
-     {etag, proplists:get_value("etag", Headers)},
-     {content_length, proplists:get_value("content-length", Headers)},
-     {content_type, proplists:get_value("content-type", Headers)},
-     {delete_marker, list_to_existing_atom(proplists:get_value("x-amz-delete-marker", Headers, "false"))},
-     {version_id, proplists:get_value("x-amz-version-id", Headers, "false")}|extract_metadata(Headers)].
+    [{last_modified, get_value("last-modified", Headers)},
+     {etag, get_value("etag", Headers)},
+     {content_length, get_value("content-length", Headers)},
+     {content_type, get_value("content-type", Headers)},
+     {delete_marker, list_to_existing_atom(get_value("x-amz-delete-marker", Headers, "false"))},
+     {version_id, get_value("x-amz-version-id", Headers, "false")}|extract_metadata(Headers)].
 
+make_metadata_headers(Options) ->
+    MetaOpts = get_value(meta, Options, []),
+    [{["x-amz-meta-"|string:to_lower(Key)], Value} ||{Key,Value} <- MetaOpts].
+    
 extract_metadata(Headers) ->
     [{Key, Value} || {["x-amz-meta-"|Key], Value} <- Headers].
 
 -spec get_object_torrent(string(), string()) -> proplists:proplist().
-
 get_object_torrent(BucketName, Key) ->
     get_object_torrent(BucketName, Key, default_config()).
 
 -spec get_object_torrent(string(), string(), config()) -> proplists:proplist().
-
 get_object_torrent(BucketName, Key, Config) ->
     {Headers, Body} = s3_request(Config, get, BucketName, [$/|Key], "torrent", [], [], []),
-    [{delete_marker, list_to_existing_atom(proplists:get_value("x-amz-delete-marker", Headers, "false"))},
-     {version_id, proplists:get_value("x-amz-delete-marker", Headers, "false")},
+    [{delete_marker, list_to_existing_atom(get_value("x-amz-delete-marker", Headers, "false"))},
+     {version_id, get_value("x-amz-delete-marker", Headers, "false")},
      {torrent, Body}].
 
--spec list_object_versions(string(), proplists:proplist()) -> proplists:proplist().
-
+-spec list_object_versions(string(), list_object_versions_options()) -> proplists:proplist().
 list_object_versions(BucketName, Options) ->
     list_object_versions(BucketName, Options, default_config()).
 
--spec list_object_versions(string(), proplists:proplist(), config()) -> proplists:proplist().
-
+-spec list_object_versions(string(), list_object_versions_options(), config())-> 
+    proplists:proplist().
 list_object_versions(BucketName, Options, Config)
   when is_list(BucketName), is_list(Options) ->
-    Params = [{"delimiter", proplists:get_value(delimiter, Options)},
-              {"key-marker", proplists:get_value(key_marker, Options)},
-              {"max-keys", proplists:get_value(max_keys, Options)},
-              {"prefix", proplists:get_value(prefix, Options)},
-              {"version-id-marker", proplists:get_value(version_id_marker, Options)}],
-    Doc = s3_xml_request(Config, get, BucketName, "/", "versions", Params, [], []),
-    Attributes = [{name, "Name", text},
-                  {prefix, "Prefix", text},
-                  {key_marker, "KeyMarker", text},
-                  {next_key_marker, "NextKeyMarker", optional_text},
-                  {version_id_marker, "VersionIdMarker", text},
-                  {next_version_id_marker, "NextVersionIdMarker", optional_text},
-                  {max_keys, "MaxKeys", integer},
-                  {is_truncated, "Istruncated", boolean},
-                  {versions, "Version", fun extract_versions/1},
-                  {delete_markers, "DeleteMarker", fun extract_delete_markers/1}],
-    ms3_xml:decode(Attributes, Doc).
+    Params = [{"delimiter", get_value(delimiter, Options)},
+              {"key-marker", get_value(key_marker, Options)},
+              {"max-keys", get_value(max_keys, Options)},
+              {"prefix", get_value(prefix, Options)},
+              {"version-id-marker", get_value(version_id_marker, Options)}],
+    Doc = s3_xml_request(Config,get,BucketName,"/","versions",Params,[],[]),
+    Attrs = [{name, "Name", text},
+             {prefix, "Prefix", text},
+             {key_marker, "KeyMarker", text},
+             {next_key_marker, "NextKeyMarker", optional_text},
+             {version_id_marker, "VersionIdMarker", text},
+             {next_version_id_marker, "NextVersionIdMarker", optional_text},
+             {max_keys, "MaxKeys", integer},
+             {is_truncated, "Istruncated", boolean},
+             {versions, "Version", fun extract_versions/1},
+             {delete_markers, "DeleteMarker", fun extract_delete_markers/1}
+            ],
+    ms3_xml:decode(Attrs, Doc).
 
 extract_versions(Nodes) ->
     [extract_version(Node) || Node <- Nodes].
@@ -705,7 +814,7 @@ extract_bucket(Node) ->
 -spec put_object(string(),
                  string(),
                  put_object(),
-                 proplists:proplist(),
+                 put_object_options(),
                  [{string(), string()}]) -> [{'version_id', _}, ...].
 put_object(BucketName, Key, Value, Options, HTTPHeaders) ->
     put_object(BucketName, Key, Value, Options, HTTPHeaders, default_config()).
@@ -713,31 +822,30 @@ put_object(BucketName, Key, Value, Options, HTTPHeaders) ->
 -spec put_object(string(),
                  string(),
                  put_object(),
-                 proplists:proplist(),
+                 put_object_options(),
                  [{string(), string()}],
                  config()) -> [{'version_id', _}, ...].
-put_object(BucketName, Key, Value, Options, HTTPHeaders, Config) ->
-    RequestHeaders = [{"x-amz-acl", encode_acl(proplists:get_value(acl, Options))}|HTTPHeaders]
-        ++ [{["x-amz-meta-"|string:to_lower(MKey)], MValue} ||
-               {MKey, MValue} <- proplists:get_value(meta, Options, [])],
-    ContentType = proplists:get_value("content-type", HTTPHeaders, "application/octet_stream"),
-    POSTData = {Value, ContentType},
-    {Headers, _Body} = s3_request(Config, put, BucketName, [$/|Key], "", [],
-                                  POSTData, RequestHeaders),
-    [{version_id, proplists:get_value("x-amz-version-id", Headers, "null")}].
+put_object(BucketName, Key, Value, Options, HTTPHdrs, Config) ->
+    FilteredHdrs = proplists:delete("content-type", HTTPHdrs),
+    ACLHdrs = [acl_header(get_value(acl, Options))],
+    ContentType = get_value("content-type",HTTPHdrs,"application/octet_stream"),
+    MetaHdrs =  make_metadata_headers(Options),
+    Hdrs = lists:flatten([ACLHdrs, FilteredHdrs, MetaHdrs]),
+    Data = {Value, ContentType},
+    Resp = s3_request(Config, put, BucketName, [$/|Key], "", [], Data, Hdrs),
+    {RespHdrs, _Body} = Resp,
+    [{version_id, get_value("x-amz-version-id", RespHdrs, "null")}].
 
 -spec set_object_acl(string(), string(), proplists:proplist()) -> ok.
-
 set_object_acl(BucketName, Key, ACL) ->
     set_object_acl(BucketName, Key, ACL, default_config()).
 
 -spec set_object_acl(string(), string(), proplists:proplist(), config()) -> ok.
-
 set_object_acl(BucketName, Key, ACL, Config)
   when is_list(BucketName), is_list(Key), is_list(ACL) ->
-    Id = proplists:get_value(id, proplists:get_value(owner, ACL)),
-    DisplayName = proplists:get_value(display_name, proplists:get_value(owner, ACL)),
-    ACL1 = proplists:get_value(access_control_list, ACL),
+    Id = get_value(id, get_value(owner, ACL)),
+    DisplayName = get_value(display_name, get_value(owner, ACL)),
+    ACL1 = get_value(access_control_list, ACL),
     XML = {'AccessControlPolicy',
            [{'Owner', [{'ID', [Id]}, {'DisplayName', [DisplayName]}]},
             {'AccessControlList', encode_grants(ACL1)}]},
@@ -761,9 +869,9 @@ set_bucket_attribute(BucketName, AttributeName, Value, Config)
             acl ->
                 ACLXML = {'AccessControlPolicy',
                           [{'Owner',
-                            [{'ID', [proplists:get_value(id, proplists:get_value(owner, Value))]},
-                             {'DisplayName', [proplists:get_value(display_name, proplists:get_value(owner, Value))]}]},
-                           {'AccessControlList', encode_grants(proplists:get_value(access_control_list, Value))}]},
+                            [{'ID', [get_value(id, get_value(owner, Value))]},
+                             {'DisplayName', [get_value(display_name, get_value(owner, Value))]}]},
+                           {'AccessControlList', encode_grants(get_value(access_control_list, Value))}]},
                 {"acl", ACLXML};
             logging ->
                 LoggingXML = {'BucketLoggingStatus',
@@ -772,9 +880,9 @@ set_bucket_attribute(BucketName, AttributeName, Value, Config)
                                   true ->
                                       [{'LoggingEnabled',
                                         [
-                                         {'TargetBucket', [proplists:get_value(target_bucket, Value)]},
-                                         {'TargetPrefix', [proplists:get_value(target_prefix, Value)]},
-                                         {'TargetGrants', encode_grants(proplists:get_value(target_grants, Value, []))}
+                                         {'TargetBucket', [get_value(target_bucket, Value)]},
+                                         {'TargetPrefix', [get_value(target_prefix, Value)]},
+                                         {'TargetGrants', encode_grants(get_value(target_grants, Value, []))}
                                         ]
                                        }];
                                   false ->
@@ -793,11 +901,11 @@ set_bucket_attribute(BucketName, AttributeName, Value, Config)
                         },
                 {"requestPayment", RPXML};
             versioning ->
-                Status = case proplists:get_value(status, Value) of
+                Status = case get_value(status, Value) of
                              suspended -> "Suspended";
                              enabled -> "Enabled"
                          end,
-                MFADelete = case proplists:get_value(mfa_delete, Value, disabled) of
+                MFADelete = case get_value(mfa_delete, Value, disabled) of
                                 enabled -> "Enabled";
                                 disabled -> "Disabled"
                             end,
@@ -814,12 +922,12 @@ encode_grants(Grants) ->
     [encode_grant(Grant) || Grant <- Grants].
 
 encode_grant(Grant) ->
-    Grantee = proplists:get_value(grantee, Grant),
+    Grantee = get_value(grantee, Grant),
     {'Grant',
      [{'Grantee', [{xmlns, ?XMLNS_S3}],
-       [{'ID', [proplists:get_value(id, proplists:get_value(owner, Grantee))]},
-        {'DisplayName', [proplists:get_value(display_name, proplists:get_value(owner, Grantee))]}]},
-      {'Permission', [encode_permission(proplists:get_value(permission, Grant))]}]}.
+       [{'ID', [get_value(id, get_value(owner, Grantee))]},
+        {'DisplayName', [get_value(display_name, get_value(owner, Grantee))]}]},
+      {'Permission', [encode_permission(get_value(permission, Grant))]}]}.
 
 -spec s3_simple_request(config(), method(), string(), string(), string(), list(), post_data(), headers()) -> ok.
 s3_simple_request(Config, Method, Host, Path, Subresource, Params, POSTData, Headers) ->
@@ -863,6 +971,8 @@ get_credentials_iam_role() ->
                           "Failed to retrieve Amazon IAM Role"})
     end.
 
+%% @TODOLook at refactoring baked_in vs. iam data representation. Avoid
+%% unnecessary duplication.
 -spec get_credentials(baked_in|iam, headers(), string(), string()) ->
     {headers(), string(), string()}.
 get_credentials(baked_in, Headers, AccessKey, SecretKey) ->
@@ -872,11 +982,11 @@ get_credentials(iam, InitialHeaders, _, _) ->
     URI = ?AMAZON_METADATA_SERVICE ++ "iam/security-credentials/" ++ CredentialsIamRole,
     Resp = send_req(URI, get),
     case Resp of
-        {ok, {200, _Headers, JSONBody}} ->
+        {ok, {200, _, JSONBody}} ->
             IAMData = jsx:decode(JSONBody),
-            AccessKeyBin = proplists:get_value(<<"AccessKeyId">>, IAMData),
-            SecretAccessKeyBin = proplists:get_value(<<"SecretAccessKey">>, IAMData),
-            SecurityToken = proplists:get_value(<<"Token">>, IAMData),
+            AccessKeyBin = get_value(<<"AccessKeyId">>, IAMData),
+            SecretAccessKeyBin = get_value(<<"SecretAccessKey">>, IAMData),
+            SecurityToken = get_value(<<"Token">>, IAMData),
             Headers = [{"x-amz-security-token", SecurityToken} | InitialHeaders],
             {Headers, AccessKeyBin, SecretAccessKeyBin};
         {ok, {StatusCode, _Headers, _Body}} ->
@@ -885,17 +995,23 @@ get_credentials(iam, InitialHeaders, _, _) ->
                           "Failed to retrieve Amazon IAM Credentials"})
     end.
 
-%% @TODO: Remove this binary() -> iolist() code and use iolist() throughout
-%%        We can easily fix this by remove the functions with guard clauses
+
+%% @TODO: Use the Options lists to reduce the length of this method
+%%        signature and try to reduce complexity. If not, consider
+%%        using a record to tuple structure.
 -spec s3_request(config(), method(), string(), string(), string(), list(), post_data(), headers()) -> {headers(), binary()}.
-s3_request(Config = #config{credentials_store=CredentialsStore,
-                            access_key_id=MaybeAccessKey,
-                            secret_access_key=MaybeSecretKey},
-           Method, Host, Path, Subresource, Params, POSTData, InitialHeaders) ->
+s3_request(Conf,Method,Host,Path,Subresource,Params,Data,Hdrs) ->
+    s3_request(Conf,Method,Host,Path,Subresource,Params,Data,Hdrs,[]).
+
+-spec s3_request(config(), method(), string(), string(), string(), list(), post_data(), headers(), proplists:proplist()) -> {headers(), binary()}.
+s3_request(Conf, Method,Host,Path,Subresource,Params,Data,Hdrs,Opts) ->
+    #config{credentials_store=CredentialsStore,
+                access_key_id=MaybeAccessKey,
+            secret_access_key=MaybeSecretKey} = Conf,
     {Headers, AccessKey, SecretKey} =
-        get_credentials(CredentialsStore, InitialHeaders,
+        get_credentials(CredentialsStore, Hdrs,
                         MaybeAccessKey, MaybeSecretKey),
-    {ContentMD5, ContentType, Body} = hash_post_data(POSTData),
+    {ContentMD5, ContentType, Body} = hash_post_data(Data),
     AmzHeaders = lists:filter(fun ({"x-amz-" ++ _, V}) when
                                         V =/= undefined -> true;
                                   (_) -> false
@@ -919,7 +1035,7 @@ s3_request(Config = #config{credentials_store=CredentialsStore,
                           false ->
 [{"content-type", ContentType} | RequestHeaders0]
                       end,
-    RequestURI = lists:flatten([format_s3_uri(Config, Host),
+    RequestURI = lists:flatten([format_s3_uri(Conf, Host),
                                 EscapedPath,
                                 if_not_empty(Subresource, [$?, Subresource]),
                                 if
@@ -927,16 +1043,16 @@ s3_request(Config = #config{credentials_store=CredentialsStore,
                                     Subresource =:= "" -> [$?, ms3_http:make_query_string(Params)];
                                     true -> [$&, ms3_http:make_query_string(Params)]
                                 end]),
-    send_s3_request(RequestURI, Method, RequestHeaders1, Body).
+    send_s3_request(RequestURI, Method, RequestHeaders1, Body, Opts).
 
--spec send_s3_request(string(), atom(), headers(), iodata()) ->
+-spec send_s3_request(string(),atom(),headers(),iodata(),httpc_opts()) ->
     {headers(), binary()}.
-send_s3_request(URI, Method, Headers, Body) ->
+send_s3_request(URI, Method, Headers, Body, Opts) ->
     Response = case Method of
         get ->
-            send_req(URI, get, Headers);
+            send_req(URI, get, Headers, Opts);
         delete ->
-            send_req(URI, delete, Headers);
+            send_req(URI, delete, Headers, Opts);
         head ->
             %% ibrowse is unable to handle HEAD request responses that are sent
             %% with chunked transfer-encoding (why servers do this is not
@@ -944,33 +1060,35 @@ send_s3_request(URI, Method, Headers, Body) ->
             %% to use HTTP 1.0 works around the problem.
             %%
             %% @TODO: Verify this against live Amazon S3 using dlhttpc
-            send_req(URI, head, Headers);
+            send_req(URI, head, Headers, Opts);
         _ ->
             %% @TODO: I think this is 'put' only. Let's make it explicit
-            send_req(URI, Method, Headers, Body)
+            send_req(URI, Method, Headers, Body, Opts)
     end,
     parse_s3_response(Response).
 
 % @TODO Clean up this ugly method signature.:
 -spec hash_post_data({PostData    :: iolist()
-                                   | {stream, filename()}
-                                   | {stream, filename(), chunk_size_bytes()},
+                                   | {stream_from, filename()}
+                                   | {stream_from, {filename(),
+                                                    chunk_size_bytes()}},
                       ContentType :: string()
                      }) ->
     {Hash        :: string(), 
      ContentType :: string(),
      Body        :: iolist()
-                  | {stream, filename(), chunk_size_bytes()}
+                  | {stream_from, {filename(), chunk_size_bytes()}}
+                  | {stream_from, filename()}
     }.
-hash_post_data({{stream, Filename}, ContentType}) ->
-    hash_post_data({{stream, Filename, ?DEFAULT_CHUNK_SIZE}, ContentType});    
-hash_post_data({{stream, Filename, ChunkSize} = PostData, ContentType}) ->
-    {base64_hash_file(Filename, ChunkSize), ContentType, PostData};
-hash_post_data({PostData, ContentType}) ->
-    {base64:encode_to_string(crypto:hash(md5,PostData)), ContentType, PostData};
-hash_post_data(PostData) ->
+hash_post_data({{stream_from,{Filename, ChunkSize}} = POSTData,ContentType}) ->
+    {base64_hash_file(Filename, ChunkSize), ContentType, POSTData};
+hash_post_data({{stream_from, Filename} = POSTData, ContentType}) ->
+    {base64_hash_file(Filename, ?DEFAULT_CHUNK_SIZE), ContentType, POSTData};
+hash_post_data({POSTData, ContentType}) ->
+    {base64:encode_to_string(crypto:hash(md5,POSTData)), ContentType, POSTData};
+hash_post_data(POSTData) ->
     %% On a put/post even with an empty body we need some content-type
-    {"", "text/xml", PostData}.
+    {"", "text/xml", POSTData}.
 -spec base64_hash_file(Filename  :: filename(),
                        ChunkSize :: chunk_size_bytes())->
     {ok, string()} | {error, Reason::any()}.
@@ -1020,7 +1138,7 @@ hash_file(File, ChunkSize, HashContext, {ok, Data}) ->
 hash_file(_File, _ChunkSize, _HashContext, {error, Reason}) ->
     {error, Reason}.
 
--spec parse_s3_response(response()) -> {headers(), binary()}.
+-spec parse_s3_response(http_response()) -> {headers(), binary()}.
 parse_s3_response({error, Error}) ->
     erlang:error({aws_error, {socket_error, Error}});
 parse_s3_response({ok, {StatusCode, Headers, Body}}) ->
@@ -1032,35 +1150,27 @@ parse_s3_response({ok, {StatusCode, Headers, Body}}) ->
             erlang:error({aws_error, {http_error, StatusCode, {Headers,Body}}})
     end.
 
--spec send_req(string(), method() | string()) -> response().
+%% Shorthand for proplists:get_value/2
+-spec get_value(any(), list({any(), any()})) -> any() | undefined. 
+get_value(Key, List) ->
+    get_value(Key, List, undefined).
+    
+%% Shorthand for proplists:get_value/3
+-spec get_value(any(), list({any(), any()}), any()) -> any() | undefined. 
+get_value(Key, List, Default) ->
+    proplists:get_value(Key, List, Default).
+
+-spec send_req(string(), method() | string()) -> http_response().
 send_req(URI, Method) ->
-    send_req(URI, Method, [], []).
+    send_req(URI, Method, [], [], []).
 
--spec send_req(string(), method() | string(), headers()) -> response().
-send_req(URI, Method, Headers) ->
-    send_req(URI, Method, Headers, []).
+-spec send_req(string(), method(), headers(), httpc_opts()) ->
+    http_response().
+send_req(URI, Method, Headers, Opts) ->
+    send_req(URI, Method, Headers, [], Opts).
 
-%% @doc send_req passes the request to the underlying HTTP Client
-%%      implementation 
-%%
--spec send_req(URI      :: string(),
-               Method   :: method(),
-               Headers  :: headers(),
-               Body     :: iolist()
-                         | {stream, filename(), chunk_size_bytes()}) ->
-    response().
-send_req(URI, Method, Headers, {{stream, Filename, _}, _CT} = Body) ->
-    CL = "content-length",
-    NewHeaders = case lists:keyfind(CL, 1, Headers) of
-        false ->
-            CLHeader = {CL, integer_to_list(filelib:file_size(Filename))},
-            lists:keystore(CL, 1, Headers, CLHeader);
-        _ ->
-            Headers
-    end,
-    send_req(URI, Method, NewHeaders, Body);
-send_req(URI, Method, Headers, Body) ->
-    httpc_impl:send_req(URI, Method, Headers, Body, ?HTTP_TIMEOUT).
+send_req(URI, Method, Headers, Body, Opts) ->
+    httpc_impl:send_req(URI, Method, Headers, Body, Opts).
 
 -spec make_authorization(AccessKeyId::binary(),
                          SecretKey::binary(),
@@ -1086,7 +1196,7 @@ make_authorization(AccessKeyId, SecretKey, Method, ContentMD5, ContentType, Date
                     if_not_empty(Host, [$/, Host]),
                     Resource,
                     if_not_empty(Subresource, [$?, Subresource])],
-    ShaHmac = crypto:hmac(slha, SecretKey, StringToSign),
+    ShaHmac = crypto:hmac(sha, SecretKey, StringToSign),
     Signature = base64:encode_to_string(ShaHmac),
     {StringToSign, lists:flatten(["AWS ", AccessKeyId, $:, Signature])}.
 

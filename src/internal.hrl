@@ -28,6 +28,8 @@
 
 % metadata service is only used from within an instance.
 -define(AMAZON_METADATA_SERVICE,"http://169.254.169.254/latest/meta-data/").
--define(HTTP_TIMEOUT, 5000).
+
+-define(DEFAULT_CHUNK_SIZE, 64*1024). % 64kb chunks for streaming
+-define(DEFAULT_HTTP_TIMEOUT, 5000). % 5 seconds
 -define(XMLNS_S3, "http://s3.amazonaws.com/doc/2006-03-01/").
 

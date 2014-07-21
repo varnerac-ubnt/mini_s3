@@ -70,7 +70,7 @@ t_put_and_delete_object_test(_Config) ->
     [_|_] = mini_s3:delete_object(BucketName, Key, S3Conf),
     ok = mini_s3:delete_bucket(BucketName, S3Conf),
     Content = proplists:get_value(content, GetResults),
-    Content = iolist_to_binary(Value),
+    true = iolist_to_binary(Value) =:= Content,
     PutVersion = proplists:get_value(version_id, PutResults),
     GetVersion = proplists:get_value(version_id, GetResults),
     true = PutVersion =:= GetVersion,
@@ -82,18 +82,63 @@ t_stream_large_file_test(Config) ->
     % write a 50Mb file
     {ok, Filename} = generate_large_file(Config, 1024*1024*50),
     BucketName = "stream_bucket",
-    Key = "stream_key",
+    Key1 = "stream_key",
+    Key2 = "stream_key",
     S3Conf = test_config(),
     ok = mini_s3:create_bucket(BucketName, private, none, S3Conf),
-    PutResults = mini_s3:put_object(BucketName,
-                                    Key,
-                                    {stream, Filename, 128*1024},
-                                    [],
-                                    [],
+    _PutResults1 = mini_s3:put_object(BucketName,
+                                      Key1,
+                                      {stream_from, {Filename, 128*1024}},
+                                      [],
+                                      [],
                                     S3Conf),
-    %GetResults = mini_s3:get_object(BucketName, Key, [], S3Conf),
-    [_|_] = mini_s3:delete_object(BucketName, Key, S3Conf),
+    _PutResults2 = mini_s3:put_object(BucketName,
+                                      Key2,
+                                      {stream_from, Filename},
+                                      [],
+                                      [],
+                                      S3Conf),
+    DownloadFName2 = large_file_path(Config) ++ ".dnwld2",
+    DownloadFName3 = large_file_path(Config) ++ ".dnwld3",
+    DownloadFName5 = large_file_path(Config) ++ ".dnwld5",
+    DownloadFName6 = large_file_path(Config) ++ ".dnwld6",
+    StrmOpts2 = [{stream_to_file, DownloadFName2}],
+    StrmOpts3 = [
+                 {stream_to_file, DownloadFName3},
+                 {partial_download, [{part_size, 128 * 1024}]}
+                ],
+    StrmOpts5 = [{stream_to_file, DownloadFName5}],
+    StrmOpts6 = [
+                 {stream_to_file, DownloadFName6},
+                 {partial_download, [{part_size, 256 * 1024}]}
+                ],
+    GetResults1 = mini_s3:get_object(BucketName, Key1, [], S3Conf),
+    [_|_] = mini_s3:get_object(BucketName, Key1, StrmOpts2, S3Conf),
+    [_|_] = mini_s3:get_object(BucketName, Key1, StrmOpts3, S3Conf),
+    GetResults4 = mini_s3:get_object(BucketName, Key2, [], S3Conf),
+    [_|_] = mini_s3:get_object(BucketName, Key2, StrmOpts5, S3Conf),
+    [_|_] = mini_s3:get_object(BucketName, Key2, StrmOpts6, S3Conf),
+    Content1 = proplists:get_value(content, GetResults1),
+    Hash1 = crypto:hash(md5, Content1),
+    {ok, Content2} = file:read_file(DownloadFName2),
+    Hash2 = crypto:hash(md5, Content2),
+    {ok, Content3} = file:read_file(DownloadFName3),
+    Hash3 = crypto:hash(md5, Content3),
+    Content4 = proplists:get_value(content, GetResults4),
+    Hash4 = crypto:hash(md5, Content4),
+    {ok, Content5} = file:read_file(DownloadFName5),
+    Hash5 = crypto:hash(md5, Content5),
+    {ok, Content6} = file:read_file(DownloadFName6),
+    Hash6 = crypto:hash(md5, Content6),
+    Results = [Hash1,Hash2,Hash3,Hash4,Hash5,Hash6],
+    Hash1 = Hash2 = Hash3 = Hash4 = Hash5 = Hash6,
+    [_|_] = mini_s3:delete_object(BucketName, Key1, S3Conf),
+    [_|_] = mini_s3:delete_object(BucketName, Key2, S3Conf),
     ok = mini_s3:delete_bucket(BucketName, S3Conf),
+    ok = file:delete(DownloadFName2),
+    ok = file:delete(DownloadFName3),
+    ok = file:delete(DownloadFName5),
+    ok = file:delete(DownloadFName6),
     ok.
 
 %%%------------------------------------------------------------------------
@@ -211,8 +256,12 @@ del_dir_all(Dir) ->
                   Filenames),
     file:del_dir(Dir).
 
+
+large_file_path(Config) ->
+    filename:join([get_data_dir(Config), "test_files", "big_file.bin"]).
+
 generate_large_file(Config, Size) ->
-    FName = filename:join([get_data_dir(Config), "test_files", "big_file.bin"]),
+    FName = large_file_path(Config),
     case filelib:is_file(FName) andalso (filelib:file_size(FName) > Size) of
         true ->
             {ok, FName};
