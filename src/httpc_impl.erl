@@ -11,7 +11,6 @@
 
 -spec start() -> ok.
 start() ->
-    ok = application:start(dispcount),
     ok = lhttpc:start(),
     ok.
 

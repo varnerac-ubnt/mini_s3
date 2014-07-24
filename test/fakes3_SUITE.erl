@@ -130,7 +130,6 @@ t_stream_large_file_test(Config) ->
     Hash5 = crypto:hash(md5, Content5),
     {ok, Content6} = file:read_file(DownloadFName6),
     Hash6 = crypto:hash(md5, Content6),
-    Results = [Hash1,Hash2,Hash3,Hash4,Hash5,Hash6],
     Hash1 = Hash2 = Hash3 = Hash4 = Hash5 = Hash6,
     [_|_] = mini_s3:delete_object(BucketName, Key1, S3Conf),
     [_|_] = mini_s3:delete_object(BucketName, Key2, S3Conf),

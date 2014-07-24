@@ -861,7 +861,6 @@ set_bucket_attribute(BucketName, AttributeName, Value) ->
 
 -spec set_bucket_attribute(string(), settable_bucket_attribute_name(),
                            'bucket_owner' | 'requester' | [any()], config()) -> ok.
-
 set_bucket_attribute(BucketName, AttributeName, Value, Config)
   when is_list(BucketName) ->
     {Subresource, XML} =
@@ -971,7 +970,7 @@ get_credentials_iam_role() ->
                           "Failed to retrieve Amazon IAM Role"})
     end.
 
-%% @TODOLook at refactoring baked_in vs. iam data representation. Avoid
+%% @TODO Look at refactoring baked_in vs. iam data representation. Avoid
 %% unnecessary duplication.
 -spec get_credentials(baked_in|iam, headers(), string(), string()) ->
     {headers(), string(), string()}.

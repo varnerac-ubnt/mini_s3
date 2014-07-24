@@ -18,21 +18,70 @@
 %%
 
 -module(ms3_signature).
+-author("Drew Varner").
 
--export([string_to_sign/7]).
+% -export([string_to_sign/7]).
+-compile(export_all).
 
 -type http_method() :: httpc:method().
 
--type header_name() :: string() | atom().
+-type header_name() :: string().
 -type header_value() :: string() | undefined.
 
 -type header() :: {header_name(), header_value()}.
 -type headers() :: [header()].
 
 -ifdef(TEST).
--compile([export_all]).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
+
+-spec get_auth_header(AccessKeyID     :: string(), 
+                      SecretAccessKey :: string(), 
+                      Location        :: mini_s3:location_constraint(),
+                      Service         :: mini_s3:service(),
+                      Method          :: http_method(),
+                      URI             :: string(),
+                      Headers         :: headers(),
+                      RequestPayload  :: iodata(),
+                      Datetime        :: calendar:datetime(),
+                      Algorithm       :: crypto:hash_algorithms()) -> header().
+    get_auth_header(KeyID,Key,Loc,Serv,Method,URI,Hdrs,Payload,Datetime,Alg) ->
+        Res = canonical_request(Method, URI, Hdrs, Payload, Alg),
+        {signed_headers, SignedHdrs, canonical_request, CReq} = Res,
+        HashedCReq = hash_and_hex_encode(Alg, CReq),
+        StringToSign = string_to_sign(Alg, Loc, Serv, Datetime, HashedCReq),
+        Sig = get_signature(Key, Loc, Serv, StringToSign, Datetime, Alg),
+        CredentialScope = credential_scope(Datetime, Loc, Serv),
+        Val = [
+               hash_algorithm_to_string(Alg),
+               " Credential=", KeyID, $/, CredentialScope,
+               ", SignedHeaders=", SignedHdrs,
+               ", Signature=", Sig
+              ],
+        {"Authorization", lists:flatten(Val)}.
+         
+-spec get_signature(Key          :: string(), 
+                    Location     :: mini_s3:location_constraint(),
+                    Service      :: mini_s3:service(),
+                    StringToSign :: iolist(),
+                    Date         :: calendar:datetime(),
+                    Algorithm    :: crypto:hash_algorithms()) ->
+    HexString::string().
+    get_signature(Key, Location, Service, StringToSign, Date, Algorithm) ->
+    SigningKey = signing_key(Key, Location, Service, Date),
+    hex_encode(crypto:hmac(Algorithm, SigningKey, StringToSign)).
+
+-spec signing_key(SecretAccessKey  :: string(), 
+                           Region  :: mini_s3:location_constraint(),
+                           Service :: mini_s3:service(),
+                           Date    :: calendar:datetime()) -> binary().
+signing_key(SecretAccessKey, Region, Service, Date) ->
+    {{Year, Month, Day}, _} = Date,
+    DateString = io_lib:format("~4.10.0B~2.10.0B~2.10.0B", [Year, Month, Day]),
+    DateKey = crypto:hmac(sha256, "AWS4" ++ SecretAccessKey, DateString),
+    DateRegionKey = crypto:hmac(sha256, DateKey, atom_to_list(Region)),
+    DateRegionServiceKey = crypto:hmac(sha256, DateRegionKey, atom_to_list(Service)),
+    crypto:hmac(sha256, DateRegionServiceKey, "aws4_request").
 
 %% @doc This method is Task 2 of the Anmazon Web Services Signature
 %%      Version 4 signing process. Note that the Erlang implemntation
@@ -40,54 +89,32 @@
 %%      This saves us from having to join the lists together and it
 %%      prevents us from breaking the string() typespec if we were
 %%      to include integers greater than 255 (some unicode characters).
--spec string_to_sign(Algorithm              :: crypto:hash_algorithms(),
-                     LocationConstraint     :: mini_s3:location_constraint(),
-                     Service                :: mini_s3:service(),
-                     Method                 :: http_method(),
-                     URI                    :: string(),
-                     Headers                :: headers(),
-                     RequestPayload         :: iodata()) ->
-    StringToSign::iolist().
-string_to_sign(Algorithm,
-               LocationConstraint,
-               Service,
-               Method,
-               URI,
-               Headers,
-               RequestPayload) ->
-    {Date, Time} = now_utc(),
-    RequestDateTime = iso_8601_date_time_fmt({Date, Time}),
-    HashedCRequest = hashed_canonical_request(Method,
-                                              URI,
-                                              Headers,
-                                              RequestPayload,
-                                              Algorithm),
-    [hash_algorithm_to_string(Algorithm), $\n,
+-spec string_to_sign(Alg        :: crypto:hash_algorithms(),
+                     Location   :: mini_s3:location_constraint(),
+                     Service    :: mini_s3:service(),
+                     Datetime   :: calendar:datetime(),
+                     HashedCReq :: iolist()) -> iolist().
+string_to_sign(Alg, Location, Service, Datetime, HashedCReq) ->
+    RequestDateTime = datetime_fmt(Datetime),
+    [hash_algorithm_to_string(Alg), $\n,
      RequestDateTime, $\n,
-     credential_scope(Date, LocationConstraint, Service), $\n,
-     HashedCRequest
+     credential_scope(Datetime, Location, Service), $\n,
+     HashedCReq
     ].
 
--spec credential_scope(Date               :: calendar:date(),
-                       LocationConstraint :: mini_s3:location_constraint(),
-                       Service            :: mini_s3:service()) -> iolist().
-credential_scope(Date, LocationConstraint, Service) ->
-    [iso_8601_date_fmt(Date), $/,
-     atom_to_unicode_binary(LocationConstraint), $/,
-     atom_to_unicode_binary(Service), $/,
-     "aws4_request\n"].
-
- %% @doc This method is Task 1 of the Anmazon Web Services Signature
- %%      Version 4 signing process.   
--spec hashed_canonical_request(Method         :: http_method(),
-                               URI            :: string(),
-                               Headers        :: headers(),
-                               RequestPayload :: iodata(),
-                               HashAlgorithm  :: crypto:hash_algorithms()) ->
-    string().
-hashed_canonical_request(Method,URI,Headers,RequestPayload,HashAlgorithm) ->
-    CReq = canonical_request(Method,URI,Headers,RequestPayload,HashAlgorithm),
-    hash_and_hex_encode(HashAlgorithm, CReq).
+%% This method technically breaks the requirement in
+%% Amazon Web Services Version 4 Signature Documentation that:
+%% "The region and service name strings must be UTF-8 encoded."
+%% However, most Erlang HTTP client libraries only accept headers
+%% as `string()`. So, for now we are going to ignore this requirement.
+-spec credential_scope(calendar:datetime(),       
+                       mini_s3:location_constraint(),
+                       mini_s3:service()) -> iolist().
+credential_scope({Date, _Time} = _Datetime, LocationConstraint, Service) ->
+    [date_fmt(Date), $/,
+     atom_to_list(LocationConstraint), $/,
+     atom_to_list(Service), $/,
+     "aws4_request"].
 
 -spec canonical_request(Method         :: http_method(),
                         URI            :: string(),
@@ -96,12 +123,9 @@ hashed_canonical_request(Method,URI,Headers,RequestPayload,HashAlgorithm) ->
                         HashAlgorithm  :: crypto:hash_algorithms()) -> string().
 canonical_request(Method, URI, Headers, RequestPayload, HashAlgorithm) ->
     {ok, {_, _, _, _, Path, Query}} = http_uri:parse(URI),
-    CURI = case Path of
-      "" -> "/";
-      _  -> Path
-    end,
+    CURI = canonicalize_uri(Path, []),
     CQueryString = canonicalize_query_string(Query),
-    {header_names, SignedHdrs, headers, CHdrs} = canonicalize_headers(Headers),
+    {header_names,SignedHdrs,headers,CHdrs} = canonicalize_headers(Headers, []),
     canonical_request(Method,
                       CURI,
                       CQueryString,
@@ -111,7 +135,7 @@ canonical_request(Method, URI, Headers, RequestPayload, HashAlgorithm) ->
                       HashAlgorithm).
 
 -spec canonical_request(Method       :: http_method(),
-                        CUR          :: string(),
+                        CURI         :: string(),
                         CQueryString :: string(),
                         CHdrs        :: string(),
                         SignedHdrs   :: string(),
@@ -120,38 +144,69 @@ canonical_request(Method, URI, Headers, RequestPayload, HashAlgorithm) ->
 canonical_request(Method,CURI,CQueryString,CHdrs,SignedHdrs,Payload,HashAlg) ->
     HashedAndHexedPayload = hash_and_hex_encode(HashAlg, Payload),
     HTTPRequestMethod = string:to_upper(atom_to_list(Method)),
-    string:join([HTTPRequestMethod,
-                 CURI,
-                 CQueryString,
-                 CHdrs,
-                 SignedHdrs,
-                 HashedAndHexedPayload],
-                 "\n").
+    CReq = string:join([HTTPRequestMethod,
+                        CURI,
+                        CQueryString,
+                        CHdrs,
+                        SignedHdrs,
+                        HashedAndHexedPayload],
+                        "\n"),
+    {signed_headers, SignedHdrs, canonical_request, CReq}.
 
--spec canonicalize_headers(headers()) ->
-    {header_names, string(), headers, string()}.
-canonicalize_headers([]) ->
-    {error, headers_cannot_be_empty};
-canonicalize_headers(Headers) ->
-    canonicalize_headers(Headers, []).
+%% TODO: Stop adding things to tail of list
+
+% A
+canonicalize_uri(["../" | Rest], Acc) ->
+    canonicalize_uri(Rest, Acc);
+canonicalize_uri(["./" | Rest], Acc) ->
+    canonicalize_uri(Rest, Acc);
+% B
+canonicalize_uri(["/./" | Rest], Acc) ->
+    canonicalize_uri(["/" | Rest], Acc);
+canonicalize_uri("/.", Acc) ->
+    Acc;
+% C
+canonicalize_uri(["/../" | Rest], Acc) ->
+    canonicalize_uri(["/"| Rest], remove_last_segment(Acc));
+canonicalize_uri("/..", Acc) ->
+    remove_last_segment(Acc);
+canonicalize_uri(".", Acc) ->
+    canonicalize_uri([], Acc);
+canonicalize_uri("..", Acc) ->
+    canonicalize_uri([], Acc);
+canonicalize_uri([], Acc) ->
+    Acc;
+canonicalize_uri(URI, Acc) ->
+    {First, Rest} = get_and_remove_first_segment(URI),
+    canonicalize_uri(Rest, Acc ++ First).
+
+get_and_remove_first_segment([$/ | Rest] = URI) ->
+    lists:split(string:chr(Rest, $/), URI).
+
+remove_last_segment(String) ->
+    Start = string:rchr(String, $/),
+    lists:sublist(String, Start - 1).
 
 -spec canonicalize_headers(headers(), headers()) ->
-    {header_names, string(), headers, string()}.
+    {header_names,string(),headers,string()} | {error,headers_cannot_be_empty}.
+canonicalize_headers([], []) ->
+    {error, headers_cannot_be_empty};
 canonicalize_headers([], Acc) ->
-    Headers = lists:keysort(1, Acc),
+    Headers = lists:sort(lists:reverse(Acc)),
     HeaderNames = proplists:get_keys(Headers),
     Headers1 = case length(HeaderNames) =:= length(Headers) of
         true ->
             Headers;
         false ->
             % Merge duplicate headers
-            [{HN, proplists:get_all_values(HN, Headers)} || HN <- HeaderNames]
+            [{HN,
+              string:join(lists:sort(proplists:get_all_values(HN, Headers)), ",")} || HN <- HeaderNames]
     end,
-    HString = lists:flatten([[Name,$:,Value,$\n] || {Name, Value} <- Headers1]),
-    HNamesString = string:join(HeaderNames, ";"),
+    Headers2 = lists:keysort(1, Headers1),
+    HString = lists:flatten([[Name,$:,Value,$\n] || {Name, Value} <- Headers2]),
+    HNamesString = string:join(lists:sort(HeaderNames), ";"),
     {header_names, HNamesString, headers, HString};
 canonicalize_headers([{_, undefined} | Rest], Acc) ->
-    % ignore undefined headers
     canonicalize_headers(Rest, Acc);
 canonicalize_headers([Header | Rest], Acc) ->
     canonicalize_headers(Rest, [canonicalize_header(Header) | Acc]).
@@ -223,8 +278,7 @@ maybe_append_equal(String) ->
     end.
 
 -spec hash_and_hex_encode(HashAlgorithm :: crypto:hash_algorithms(),
-                          Data          :: iodata()) -> 
-    string().
+                          Data          :: iodata()) -> string().
 hash_and_hex_encode(HashAlgorithm, Data) ->
     Hashed = crypto:hash(HashAlgorithm, Data),
     hex_encode(Hashed).
@@ -236,12 +290,12 @@ hex_encode(Binary) ->
 now_utc() ->
     erlang:localtime_to_universaltime(erlang:localtime()).
 
-iso_8601_date_time_fmt({{Year,Month,Day}, {Hour,Min,Sec}}) ->
-    io_lib:format("~4.10.0B-~2.10.0B-~2.10.0BT~2.10.0B:~2.10.0B:~2.10.0BZ",
+datetime_fmt({{Year,Month,Day}, {Hour,Min,Sec}}) ->
+    io_lib:format("~4.10.0B~2.10.0B~2.10.0BT~2.10.0B~2.10.0B~2.10.0BZ",
                   [Year, Month, Day, Hour, Min, Sec]).
 
-iso_8601_date_fmt({Year,Month,Day}) ->
-    io_lib:format("~4.10.0B-~2.10.0B-~2.10.0B", [Year, Month, Day]).
+date_fmt({Year,Month,Day}) ->
+    io_lib:format("~4.10.0B~2.10.0B~2.10.0B", [Year, Month, Day]).
 
 -spec hash_algorithm_to_string(crypto:hash_algorithms()) -> string().
 hash_algorithm_to_string(sha224) -> "AWS4-HMAC-SHA224";
@@ -255,6 +309,8 @@ atom_to_unicode_binary(Atom) ->
 
 -ifdef(TEST).
 
+% TODO: eunit test Canonicalize URI
+
 strip_non_quoted_spaces_test_() ->
     Tests = [
              {"abc"           , "abc"        },
@@ -265,6 +321,6 @@ strip_non_quoted_spaces_test_() ->
              {"  abc    "     , "abc"        },
              {"  a  \t bc    ", "a bc"       }
             ],
-    [ ?_assertEqual(Expect, strip_non_quoted_spaces(String)) ||
-                    {String, Expect} <- Tests].
+    [ ?_assertEqual(Expected, strip_non_quoted_spaces(String)) ||
+                    {String, Expected} <- Tests].
 -endif.

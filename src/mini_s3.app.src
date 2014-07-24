@@ -30,8 +30,7 @@
                   public_key,
                   sasl,
                   ssl,
-                  dispcount,
-                  dlhttpc,
+                  lhttpc,
                   stdlib,
                   xmerl
                  ]},
